@@ -932,6 +932,7 @@ def incremental_compilation(
     modules: List[Tuple[str, str]],
     ghdl_extra_flags: List[str] = None,
     timeout: int = 300,
+    top_module_override: Optional[str] = None,
 ) -> Tuple[bool, str, List[str], str]:
     """
     Try incremental compilation with multiple top entity candidates.
@@ -1015,6 +1016,10 @@ def incremental_compilation(
                     normalized_files.append(f)
             return True, log, normalized_files, candidate
         
+        if top_module_override and candidate == top_module_override and len(top_candidates) > 1:
+            print_yellow(
+                f"[GHDL-INCREMENTAL] Override '{top_module_override}' failed, falling back to heuristic candidates..."
+            )
         print_yellow(f"[GHDL-INCREMENTAL] ✗ Failed with top entity: {candidate}")
     
     print_red("[GHDL-INCREMENTAL] All candidates failed")

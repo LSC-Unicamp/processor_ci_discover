@@ -32,6 +32,7 @@ Command-Line Interface:
 - `-n`, `--no-llama`: Skip OLLAMA processing for top module identification.
 - `-m`, `--model`: OLLAMA model to use (default: 'qwen2.5:32b').
 - `-l`, `--local-repo`: Path to local repository (skips cloning if provided).
+- `-t`, `--top-module`: Force a specific top module (tried first, then fallback to heuristics).
 
 Usage:
 ------
@@ -40,6 +41,9 @@ python config_generator.py -u <processor_url> -p config/
 
 # Process a local repository (including Chisel projects)
 python config_generator.py -u <repo_url> -l /path/to/local/repo -p config/
+
+# Force a specific top module first (fallback to heuristics if it fails)
+python config_generator.py -u <repo_url> -p config/ -t <top_module_name>
 """
 
 import os
@@ -1067,6 +1071,7 @@ def try_incremental_approach(
     language_version: str = "1800-2023",
     verilator_extra_flags: list = None,
     timeout: int = 300,
+    top_module_override: str | None = None,
 ) -> tuple:
     """
     Try the incremental bottom-up approach for Verilog/SystemVerilog files.
@@ -1141,6 +1146,10 @@ def try_incremental_approach(
             print_green(f"[INCREMENTAL] ✓ Success with top module: {top_module}")
             return final_files, final_includes, log, top_module, True
         else:
+            if top_module_override and top_module == top_module_override and len(top_candidates) > 1:
+                print_yellow(
+                    f"[INCREMENTAL] Override '{top_module_override}' failed, falling back to heuristic candidates..."
+                )
             print_yellow(f"[INCREMENTAL] ✗ Failed with top module: {top_module}")
     
     # If all failed, return empty result
@@ -1161,6 +1170,7 @@ def interactive_simulate_and_minimize(
     maximize_attempts: int = 6,
     verilator_extra_flags: list | None = None,
     ghdl_extra_flags: list | None = None,
+    top_module_override: str | None = None,
 ) -> tuple:
     """
     Interactive flow is now delegated to runners. Core only selects candidates and passes to runners.
@@ -1195,7 +1205,15 @@ def interactive_simulate_and_minimize(
 
     # Determine primary top candidate and refine if it looks peripheral-like (AXI/memory/fabric)
     primary_top = candidates[0] if candidates else None
-    if primary_top and (
+    if top_module_override:
+        if top_module_override in module_to_file:
+            print_yellow(f"[TOP] Using user-specified top module override: {top_module_override}")
+            primary_top = top_module_override
+            # Ensure the override is tried first, keep heuristics as fallback
+            candidates = [top_module_override] + [c for c in candidates if c != top_module_override]
+        else:
+            print_yellow(f"[TOP] Warning: top module override '{top_module_override}' not found in extracted modules; falling back to heuristics")
+    if primary_top and not top_module_override and (
         _is_peripheral_like_name(primary_top)
         or _is_functional_unit_name(primary_top)
         or _is_micro_stage_name(primary_top)
@@ -1262,7 +1280,11 @@ def interactive_simulate_and_minimize(
         # Preserve order and keep primary_top first when present
         if primary_top in non_periph_verilog:
             non_periph_verilog = [primary_top] + [c for c in non_periph_verilog if c != primary_top]
-        verilog_candidates = non_periph_verilog
+        # Keep user override even if it looks peripheral-like
+        if top_module_override and top_module_override not in non_periph_verilog:
+            verilog_candidates = [top_module_override] + non_periph_verilog
+        else:
+            verilog_candidates = non_periph_verilog
 
     non_periph_vhdl = [
         c for c in vhdl_candidates
@@ -1274,7 +1296,11 @@ def interactive_simulate_and_minimize(
     if non_periph_vhdl:
         if primary_top in non_periph_vhdl:
             non_periph_vhdl = [primary_top] + [c for c in non_periph_vhdl if c != primary_top]
-        vhdl_candidates = non_periph_vhdl
+        # Keep user override even if it looks peripheral-like
+        if top_module_override and top_module_override not in non_periph_vhdl:
+            vhdl_candidates = [top_module_override] + non_periph_vhdl
+        else:
+            vhdl_candidates = non_periph_vhdl
 
     # Choose simulator based on the primary top candidate's file extension
     # IMPORTANT: For mixed-language designs, the top module's language determines the simulator
@@ -1304,6 +1330,7 @@ def interactive_simulate_and_minimize(
             modules=modules,
             ghdl_extra_flags=ghdl_extra_flags or ["-frelaxed"],
             timeout=240,
+            top_module_override=top_module_override,
         )
         if is_simulable:
             print_green(f"[CORE] ✓ Incremental GHDL approach succeeded!")
@@ -1349,6 +1376,7 @@ def interactive_simulate_and_minimize(
             language_version=language_version,
             verilator_extra_flags=verilator_extra_flags,
             timeout=240,
+            top_module_override=top_module_override,
         )
         if is_simulable:
             print_green(f"[CORE] ✓ Incremental approach succeeded!")
@@ -1372,6 +1400,7 @@ def interactive_simulate_and_minimize(
             modules=modules,
             ghdl_extra_flags=ghdl_extra_flags or ["-frelaxed"],
             timeout=240,
+            top_module_override=top_module_override,
         )
         return final_files, set(), last_log, top_module, is_simulable
         
@@ -1831,6 +1860,7 @@ def generate_processor_config(
     no_llama: bool = False,
     model: str = 'qwen2.5:32b',
     local_repo: str = None,
+    top_module_override: str | None = None,
 ) -> dict:
     """
     Main function to generate a processor configuration.
@@ -2039,6 +2069,7 @@ def generate_processor_config(
         maximize_attempts=6,
         verilator_extra_flags=verilator_flags,
         ghdl_extra_flags=['--std=08', '-frelaxed', '-fsynopsys'],
+        top_module_override=top_module_override,
     )
 
     # Convert absolute include directories to relative paths
@@ -2204,6 +2235,13 @@ def main() -> None:
         default=None,
         help='Path to local repository (skips cloning if provided)'
     )
+    parser.add_argument(
+        '-t',
+        '--top-module',
+        type=str,
+        default=None,
+        help='Force a specific top module (tried first, then falls back to heuristics on failure)'
+    )
 
     args = parser.parse_args()
 
@@ -2216,6 +2254,7 @@ def main() -> None:
             args.no_llama,
             args.model,
             args.local_repo,
+            args.top_module,
         )
         print('Result: ')
         print(json.dumps(config, indent=4))

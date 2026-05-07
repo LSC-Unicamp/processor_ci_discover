@@ -42,6 +42,15 @@ python discover_config_generator.py \
   -p config/
 ```
 
+- Force a specific top module (try first, then fallback to heuristics):
+
+```bash
+python discover_config_generator.py \
+  -u https://github.com/<org>/<repo> \
+  -t <top_module_name> \
+  -p config/
+```
+
 ## Notes
 
 - The current migration keeps behavior equivalent to `processor_ci` by preserving imports and module layout.
