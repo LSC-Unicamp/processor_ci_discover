@@ -1,4 +1,4 @@
-# processor_ci_discover
+# Processor CI Discover
 
 Standalone home for the Processor CI config discovery tool, migrated from `processor_ci/config_generator.py`.
 
