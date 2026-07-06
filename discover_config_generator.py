@@ -1,7 +1,6 @@
 """Standalone CLI entrypoint for processor configuration discovery."""
 
-from config_generator import main
-
+from processor_ci_discover.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
