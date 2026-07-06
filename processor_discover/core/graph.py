@@ -48,7 +48,6 @@ This module is useful for analyzing and visualizing the relationships between mo
 description language (HDL) code such as Verilog, SystemVerilog, and VHDL.
 """
 
-
 import re
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -71,13 +70,11 @@ def find_module_instances(content: str, module_list: list) -> list:
     # Pattern for Verilog/SystemVerilog instances: module inst_name(...) or
     # module #( ... ) inst_name(...)
     verilog_instance_pattern = re.compile(
-        r'(\w+)\s*(?:#\s*\(.*?\)\s*)?\w+\s*\(.*?\)\s*;', re.DOTALL
+        r"(\w+)\s*(?:#\s*\(.*?\)\s*)?\w+\s*\(.*?\)\s*;", re.DOTALL
     )
 
     # Pattern for VHDL instances: component module_name is
-    vhdl_instance_pattern = re.compile(
-        r'component\s+(\w+)\s+is', re.IGNORECASE
-    )
+    vhdl_instance_pattern = re.compile(r"component\s+(\w+)\s+is", re.IGNORECASE)
 
     # Search for instances in Verilog/SystemVerilog
     for match in verilog_instance_pattern.findall(content):
@@ -121,17 +118,17 @@ def build_module_graph(files: list, modules: list[dict]) -> tuple[list, list]:
     for file_path in files:
         try:
             with open(
-                file_path, 'r', errors='ignore', encoding='utf-8'
+                file_path, "r", errors="ignore", encoding="utf-8"
             ) as f:  # Ignore decoding errors
                 content = f.read()
 
                 # Find the current module name (module where instances are being made)
-                #check for both verilog and vhdl module declaration
-                if file_path.endswith(('.v', '.sv')):
-                    current_module_match = re.search(r'module\s+(\w+)', content)
-                elif file_path.endswith('.vhd'):
+                # check for both verilog and vhdl module declaration
+                if file_path.endswith((".v", ".sv")):
+                    current_module_match = re.search(r"module\s+(\w+)", content)
+                elif file_path.endswith(".vhd"):
                     current_module_match = re.search(
-                        r'entity\s+(\w+)\s+is', content, re.IGNORECASE
+                        r"entity\s+(\w+)\s+is", content, re.IGNORECASE
                     )
                 else:
                     continue  # Skip unsupported file types
@@ -196,16 +193,14 @@ def plot_processor_graph(module_graph: dict, inverse: bool = False) -> None:
         pos,
         with_labels=True,
         node_size=3000,
-        node_color='lightblue',
+        node_color="lightblue",
         font_size=10,
-        font_weight='bold',
-        edge_color='gray',
+        font_weight="bold",
+        edge_color="gray",
         arrows=True,
     )
 
     plt.title(
-        'Module Dependency Graph (Inverse)'
-        if inverse
-        else 'Module Dependency Graph'
+        "Module Dependency Graph (Inverse)" if inverse else "Module Dependency Graph"
     )
     plt.show()
