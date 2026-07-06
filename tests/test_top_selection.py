@@ -3,12 +3,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from processor_ci_discover.core.config_generator import generate_processor_config
-from processor_ci_discover.core.top_selection import rank_top_candidates
-from processor_ci_discover.lang.bluespec_manager import (
+from processor_discover.core.config_generator import generate_processor_config
+from processor_discover.core.top_selection import rank_top_candidates
+from processor_discover.lang.bluespec_manager import (
     find_top_module as find_bluespec_top_module,
 )
-from processor_ci_discover.lang.chisel_manager import (
+from processor_discover.lang.chisel_manager import (
     find_top_module as find_chisel_top_module,
 )
 
@@ -91,19 +91,19 @@ class TopSelectionRegressionTests(unittest.TestCase):
         ):
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.find_and_log_files",
+                    "processor_discover.core.config_generator.find_and_log_files",
                     return_value=(["Core.bsv"], ".bsv"),
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.process_bluespec_project",
+                    "processor_discover.core.config_generator.process_bluespec_project",
                     return_value={"name": "demo", "top_module": "mkCore"},
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.save_config",
+                    "processor_discover.core.config_generator.save_config",
                 ) as save_config,
             ):
                 config = generate_processor_config(

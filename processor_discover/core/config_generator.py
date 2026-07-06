@@ -96,7 +96,7 @@ from ..runners.ghdl_runner import (
     incremental_compilation as ghdl_incremental,
 )
 
-# Top-selection helpers live in processor_ci_discover.core.top_selection.
+# Top-selection helpers live in processor_discover.core.top_selection.
 
 
 def convert_vhdl_to_verilog_with_ghdl(
@@ -1141,8 +1141,8 @@ def generate_processor_config(
 
 
 def main(argv: list[str] | None = None) -> int | None:
-    """Compatibility entry point; CLI parsing lives in processor_ci_discover.cli."""
-    from processor_ci_discover.cli import main as cli_main
+    """Compatibility entry point; CLI parsing lives in processor_discover.cli."""
+    from processor_discover.cli import main as cli_main
 
     return cli_main(argv)
 

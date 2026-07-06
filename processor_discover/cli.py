@@ -5,7 +5,7 @@ import json
 import os
 import shutil
 
-from processor_ci_discover.utils.log import print_red
+from processor_discover.utils.log import print_red
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int | None:
     args = parser.parse_args(argv)
 
     try:
-        from processor_ci_discover.core.config_generator import (
+        from processor_discover.core.config_generator import (
             generate_processor_config,
         )
 

@@ -2,13 +2,13 @@ import subprocess
 import sys
 import unittest
 
-from processor_ci_discover.cli import build_parser
+from processor_discover.cli import build_parser
 
 
 class CliSmokeTests(unittest.TestCase):
     def test_help_runs(self) -> None:
         result = subprocess.run(
-            [sys.executable, "-m", "processor_ci_discover.cli", "-h"],
+            [sys.executable, "-m", "processor_discover.cli", "-h"],
             capture_output=True,
             text=True,
             check=False,

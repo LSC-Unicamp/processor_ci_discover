@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from processor_ci_discover.core.config_generator import generate_processor_config
+from processor_discover.core.config_generator import generate_processor_config
 
 
 @contextmanager
@@ -61,17 +61,17 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.runners.verilator_runner.compile_incremental",
+                    "processor_discover.runners.verilator_runner.compile_incremental",
                     side_effect=AssertionError(
                         "direct runner import should not be used"
                     ),
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     return_value=(0, "ok", ["forced_top.sv"], {"include"}),
                 ) as verilator_incremental,
             ):
@@ -112,11 +112,11 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     side_effect=verilator_side_effect,
                 ),
             ):
@@ -150,11 +150,11 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     side_effect=verilator_side_effect,
                 ),
             ):
@@ -182,17 +182,17 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     side_effect=AssertionError(
                         "Verilator should not be used for VHDL top"
                     ),
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.ghdl_incremental",
+                    "processor_discover.core.config_generator.ghdl_incremental",
                     return_value=(True, "ghdl ok", ["forced_top.vhd"], "ForcedTop"),
                 ) as ghdl_incremental,
             ):
@@ -223,21 +223,21 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator.handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_ci_discover.core.pipeline.get_filtered_files_list",
+                    "processor_discover.core.pipeline.get_filtered_files_list",
                     side_effect=AssertionError(
                         "get_filtered_files_list should not be called"
                     ),
                 ),
                 patch(
-                    "processor_ci_discover.core.pipeline.get_top_module",
+                    "processor_discover.core.pipeline.get_top_module",
                     side_effect=AssertionError("get_top_module should not be called"),
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     return_value=(0, "ok", ["heuristic_core.sv"], set()),
                 ) as verilator_incremental,
             ):

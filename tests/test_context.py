@@ -3,11 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from processor_ci_discover.core.api import RunContext
-from processor_ci_discover.core.config_generator import (
+from processor_discover.core.api import RunContext
+from processor_discover.core.config_generator import (
     interactive_simulate_and_minimize,
 )
-from processor_ci_discover.utils.runtime import build_run_context
+from processor_discover.utils.runtime import build_run_context
 
 
 class RunContextTests(unittest.TestCase):
@@ -85,11 +85,11 @@ class RunContextTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_ci_discover.core.config_generator.rank_top_candidates",
+                    "processor_discover.core.config_generator.rank_top_candidates",
                     return_value=(["heuristic"], []),
                 ),
                 patch(
-                    "processor_ci_discover.core.config_generator.verilator_incremental",
+                    "processor_discover.core.config_generator.verilator_incremental",
                     return_value=(0, "ok", ["forced.sv"], {"inc"}),
                 ) as verilator_incremental,
             ):

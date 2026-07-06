@@ -1,6 +1,6 @@
 import unittest
 
-from processor_ci_discover.core.heuristics import (
+from processor_discover.core.heuristics import (
     HDL_EXTRA_FUNCTIONAL_UNIT_TERMS,
     ensure_mapping,
     is_functional_unit_name,

@@ -2,7 +2,7 @@ import inspect
 import unittest
 
 import discover_config_generator
-from processor_ci_discover.core.config_generator import generate_processor_config
+from processor_discover.core.config_generator import generate_processor_config
 
 
 class ApiSmokeTests(unittest.TestCase):
@@ -12,7 +12,7 @@ class ApiSmokeTests(unittest.TestCase):
     def test_standalone_entrypoint_delegates_to_package_cli(self) -> None:
         source = inspect.getsource(discover_config_generator)
 
-        self.assertIn("from processor_ci_discover.cli import main", source)
+        self.assertIn("from processor_discover.cli import main", source)
         self.assertIn("raise SystemExit(main())", source)
 
 
