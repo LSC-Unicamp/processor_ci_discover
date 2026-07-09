@@ -1,50 +1,51 @@
 # ProcessorCI Discover
 
-Standalone home for the ProcessorCI config discovery tool, migrated from `processor_ci/config_generator.py`.
+ProcessorCI Discover generates ProcessorCI configuration files from processor
+repositories. It analyzes HDL source trees, selects candidate top modules, and
+emits JSON configuration data that can be used by the rest of the ProcessorCI
+suite.
 
-## What this repo now contains
+This repository is the standalone home for the config-discovery tool that was
+originally part of `processor_ci/config_generator.py`.
 
-- `processor_discover/`: package root
-- `processor_discover/core/`: generator and core helpers
-- `processor_discover/lang/`: Chisel/Bluespec helpers
-- `processor_discover/runners/`: simulator/minimization backends
-- `processor_discover/utils/`: shared utilities (logging, locks)
-- `processor_discover/cli.py`: CLI parsing and package entrypoint
-- `discover_config_generator.py`: stable standalone wrapper around the package CLI
-- `requirements.txt`: Python dependencies for this tool
+## Repository Layout
 
-## Quick start
+```text
+processor_discover/          Canonical Python package
+processor_discover/core/     Config generation pipeline and shared helpers
+processor_discover/lang/     Chisel and Bluespec support helpers
+processor_discover/runners/  Verilator/GHDL runner integrations
+processor_discover/utils/    Logging, runtime, and locking helpers
+tests/                       Smoke and behavior tests
+discover_config_generator.py Compatibility wrapper around the package CLI
+docs/                        Maintenance notes
+requirements.txt             Python dependencies
+```
 
-1. Create a Python virtual environment.
-2. Install dependencies:
+## Installation
 
 ```bash
+git clone https://github.com/LSC-Unicamp/processor_ci_discover.git
+cd processor_ci_discover
+python3 -m venv env
+. env/bin/activate
 pip install -r requirements.txt
 ```
 
-3. Run the tool:
+Some discovery paths use external HDL tools such as Verilator or GHDL. OLLAMA is
+optional and can be disabled with `-n`.
+
+## Quick Start
+
+Generate a config from a remote repository:
 
 ```bash
-python -m processor_discover.cli -u <processor_repo_url> -p config/
+python -m processor_discover.cli \
+  -u https://github.com/<org>/<repo> \
+  -p config/
 ```
 
-Or directly:
-
-```bash
-python discover_config_generator.py -u <processor_repo_url> -p config/
-```
-
-Both entrypoints use the same parser and behavior.
-
-## Common usage
-
-- Remote repository:
-
-```bash
-python -m processor_discover.cli -u https://github.com/<org>/<repo> -p config/
-```
-
-- Remote repository using the standalone wrapper:
+Use the compatibility wrapper:
 
 ```bash
 python discover_config_generator.py \
@@ -52,101 +53,28 @@ python discover_config_generator.py \
   -p config/
 ```
 
-- Local repository (no clone):
+Use a local checkout and skip OLLAMA:
 
 ```bash
 python -m processor_discover.cli \
   -u https://github.com/<org>/<repo> \
   -l /path/to/local/repo \
-  -p config/
-```
-
-- Local repository with an explicit output directory:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo>.git \
-  -l ~/src/<repo> \
-  -p ./generated-configs
-```
-
-- Force a specific top module (try first, then fallback to heuristics):
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -t <top_module_name> \
-  -p config/
-```
-
-- Force a top module while processing a local checkout:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/chipsalliance/rocket-chip.git \
-  -l ~/src/rocket-chip \
-  -t RocketTile \
-  -p config/
-```
-
-- Skip OLLAMA and rely on local heuristics/runners:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
   -n \
-  -p config/
+  -p generated-configs/
 ```
 
-- Skip OLLAMA and use a forced top module:
+## Common Options
 
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -n \
-  -t <top_module_name> \
-  -p config/
-```
+- `-u`, `--processor-url`: processor repository URL. Required.
+- `-p`, `--config-path`: output config directory. Defaults to `config/`.
+- `-l`, `--local-repo`: local checkout to analyze instead of cloning.
+- `-t`, `--top-module`: preferred top module to try before heuristics.
+- `-n`, `--no-llama`: disable OLLAMA-assisted filtering.
+- `-m`, `--model`: OLLAMA model name.
+- `-g`, `--plot-graph`: generate a dependency graph plot.
+- `-a`, `--add-to-config`: update a central config file as well.
 
-- Add the generated processor config to a central config file:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -a \
-  -p config/
-```
-
-- Select a different OLLAMA model:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -m llama3.1:8b \
-  -p config/
-```
-
-- Generate the dependency graph plot:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -g \
-  -p config/
-```
-
-- Combine common CI-friendly options:
-
-```bash
-python -m processor_discover.cli \
-  -u https://github.com/<org>/<repo> \
-  -l "$PWD/vendor/<repo>" \
-  -n \
-  -a \
-  -p "$PWD/config"
-```
-
-- Programmatic use from Python:
+## Programmatic Use
 
 ```python
 from processor_discover.core.config_generator import generate_processor_config
@@ -158,35 +86,32 @@ config = generate_processor_config(
     no_llama=True,
     top_module_override="<top_module_name>",
 )
-print(config["top_module"])
 ```
 
-## CLI reference
+## Development
 
-```text
-usage: python -m processor_discover.cli [-h] -u PROCESSOR_URL
-                                           [-p CONFIG_PATH] [-g] [-a] [-n]
-                                           [-m MODEL] [-l LOCAL_REPO]
-                                           [-t TOP_MODULE]
+Run tests with:
+
+```bash
+pytest
 ```
 
-- `-u`, `--processor-url`: processor repository URL. Required.
-- `-p`, `--config-path`: output config directory. Defaults to `config/`.
-- `-g`, `--plot-graph`: plot the discovered module dependency graph.
-- `-a`, `--add-to-config`: also write/update a central config file.
-- `-n`, `--no-llama`: skip OLLAMA-assisted filtering/top selection.
-- `-m`, `--model`: OLLAMA model name. Defaults to `qwen2.5:32b`.
-- `-l`, `--local-repo`: use a local checkout instead of cloning.
-- `-t`, `--top-module`: try a specific top module first, then fall back to heuristics if it fails.
+Run CLI help checks with:
 
-## Developer notes
+```bash
+python -m processor_discover.cli --help
+python discover_config_generator.py --help
+```
 
-- `processor_discover.cli.build_parser()` exposes the CLI parser for tests.
-- `processor_discover.cli.main(argv=None)` supports argument injection for tests and wrappers.
-- `processor_discover.core.config_generator.generate_processor_config(...)` remains the stable programmatic entrypoint.
-- `processor_discover.core.config_generator.main(argv=None)` is a compatibility shim into the package CLI.
+Keep `processor_discover/` as the canonical implementation. Root-level scripts
+should remain compatibility wrappers unless a migration plan says otherwise.
+See [docs/README.md](docs/README.md) for layout notes.
 
-## Notes
+## Contributing
 
-- The current migration keeps CLI behavior stable while moving parser ownership into `processor_discover/cli.py`.
-- Output configuration files are written under `config/` by default.
+Issues and pull requests are welcome. Include a small repository fixture or test
+case when changing top-module selection, HDL parsing, or config output shape.
+
+## License
+
+Use the repository license for ProcessorCI Discover contributions.
