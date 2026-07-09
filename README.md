@@ -114,4 +114,4 @@ case when changing top-module selection, HDL parsing, or config output shape.
 
 ## License
 
-Use the repository license for ProcessorCI Discover contributions.
+This project is licensed under the [MIT License](LICENSE).
