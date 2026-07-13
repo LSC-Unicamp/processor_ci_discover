@@ -2,7 +2,12 @@
 
 import os
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
+
+import yaml
 
 from .file_manager import (
     clone_repo,
@@ -22,6 +27,15 @@ from ..utils.log import print_green, print_red, print_yellow
 def extract_repo_name(url: str) -> str:
     """Extracts the repository name from the given URL."""
     return url.split("/")[-1].replace(".git", "")
+
+
+def extract_repo_owner(url: str) -> str:
+    """Extract the repository owner from a conventional Git URL."""
+    normalized = url.rstrip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    parts = normalized.replace(":", "/").split("/")
+    return parts[-2] if len(parts) >= 2 else ""
 
 
 def detect_and_run_config_script(repo_path: str, repo_name: str) -> bool:
@@ -155,6 +169,15 @@ def find_and_log_files(destination_path: str) -> tuple:
         "[LOG] Procurando arquivos com extensão .v, .sv, .vhdl, .vhd, .scala ou .bsv\n"
     )
 
+    fusesoc_flist = os.path.join(destination_path, ".fusesoc_flist")
+    if os.path.exists(fusesoc_flist):
+        with open(fusesoc_flist, encoding="utf-8") as flist:
+            files = [line.strip() for line in flist if line.strip()]
+        if files:
+            extension = ".sv" if any(path.endswith((".sv", ".svh")) for path in files) else ".v"
+            print_green(f"[DEPS] Using {len(files)} files from FuseSoC manifest")
+            return files, extension
+
     # First check for Bluespec files
     bsv_files = find_bsv_files(destination_path)
     if bsv_files:
@@ -175,6 +198,16 @@ def find_and_log_files(destination_path: str) -> tuple:
     files, extension = find_files_with_extension(
         destination_path, ["v", "sv", "vhdl", "vhd"]
     )
+    if not files:
+        unfiltered_files, extension = find_files_with_extension(
+            destination_path, ["v", "sv", "vhdl", "vhd"], exclude_filtered=False
+        )
+        fpga_src_marker = f"{os.sep}fpga{os.sep}src{os.sep}"
+        files = [path for path in unfiltered_files if fpga_src_marker in path]
+        if files:
+            print_yellow(
+                f"[FILTER] Found {len(files)} synthesizable files under fpga/src"
+            )
     return files, extension
 
 
@@ -206,7 +239,12 @@ def categorize_files(files: list, repo_name: str, destination_path: str) -> tupl
     )
 
 
-def handle_dependency_manager(destination_path: str, repo_name: str) -> bool:
+def handle_dependency_manager(
+    destination_path: str,
+    repo_name: str,
+    top_module_override: str | None = None,
+    dependency_target: str | None = None,
+) -> bool:
     """Detect and run dependency managers (Bender, FuseSoC) to fetch external dependencies.
 
     Args:
@@ -238,8 +276,6 @@ def handle_dependency_manager(destination_path: str, repo_name: str) -> bool:
                     with open(candidate, "r") as f:
                         content = f.read()
                         # Simple YAML parsing to find package name
-                        import re
-
                         match = re.search(
                             r'^\s*name:\s*["\']?(\w+)["\']?\s*$', content, re.MULTILINE
                         )
@@ -312,15 +348,19 @@ def handle_dependency_manager(destination_path: str, repo_name: str) -> bool:
                     print_yellow(
                         f"[DEPS] Generating file list with 'bender script flist'..."
                     )
-                    result_flist = subprocess.run(
-                        [
+                    flist_command = [
                             "bender",
                             "script",
-                            "flist",
-                            "--relative-path",
+                            "verilator" if dependency_target else "flist",
                             "--dir",
                             bender_rel_dir,
-                        ],
+                        ]
+                    if not dependency_target:
+                        flist_command.append("--relative-path")
+                    if dependency_target:
+                        flist_command.extend(["--target", dependency_target])
+                    result_flist = subprocess.run(
+                        flist_command,
                         cwd=destination_path,  # Run from repo root
                         capture_output=True,
                         text=True,
@@ -350,16 +390,125 @@ def handle_dependency_manager(destination_path: str, repo_name: str) -> bool:
             return False
 
     # Check for FuseSoC (used by some OpenHW projects)
-    fusesoc_core = None
-    for file in os.listdir(destination_path):
-        if file.endswith(".core"):
-            fusesoc_core = file
-            break
+    fusesoc_cores = [
+        file for file in os.listdir(destination_path) if file.endswith(".core")
+    ]
+    fusesoc_core = fusesoc_cores[0] if fusesoc_cores else None
+    if top_module_override:
+        for candidate in fusesoc_cores:
+            try:
+                candidate_text = open(
+                    os.path.join(destination_path, candidate), encoding="utf-8"
+                ).read()
+            except OSError:
+                continue
+            if re.search(
+                rf"\btoplevel\s*:\s*(?:\[[^\]]*\b)?{re.escape(top_module_override)}\b",
+                candidate_text,
+            ):
+                fusesoc_core = candidate
+                break
 
     if fusesoc_core:
         print_yellow(f"[DEPS] Detected FuseSoC core file: {fusesoc_core}")
-        print_yellow(f"[DEPS] FuseSoC support not yet implemented")
-        print_yellow(f"[DEPS] Manual setup may be required")
+        core_path = os.path.join(destination_path, fusesoc_core)
+        try:
+            core_text = open(core_path, encoding="utf-8").read()
+            if core_text.startswith("CAPI=2:"):
+                core_text = core_text.split("\n", 1)[1]
+            core_data = yaml.safe_load(core_text) or {}
+            vlnv = str(core_data.get("name", "")).strip()
+            targets = core_data.get("targets", {}) or {}
+            target = "default"
+            if top_module_override:
+                matching_targets = []
+                for target_name, target_data in targets.items():
+                    toplevel = (target_data or {}).get("toplevel", [])
+                    if isinstance(toplevel, str):
+                        toplevel = [toplevel]
+                    if top_module_override in toplevel:
+                        matching_targets.append((target_name, target_data or {}))
+                if matching_targets:
+                    target = next(
+                        (
+                            name
+                            for name, data in matching_targets
+                            if data.get("default_tool") or data.get("tools") or data.get("flow")
+                        ),
+                        matching_targets[0][0],
+                    )
+
+            fusesoc = shutil.which("fusesoc")
+            sibling_fusesoc = os.path.join(os.path.dirname(sys.executable), "fusesoc")
+            if not fusesoc and os.path.exists(sibling_fusesoc):
+                fusesoc = sibling_fusesoc
+            if not fusesoc or not vlnv:
+                print_yellow("[DEPS] FuseSoC executable or core name unavailable")
+                return False
+
+            generated_flist = os.path.join(destination_path, ".fusesoc_flist")
+            if os.path.exists(generated_flist):
+                os.remove(generated_flist)
+
+            with tempfile.TemporaryDirectory(prefix="processor-ci-fusesoc-") as work:
+                env = os.environ.copy()
+                env["XDG_CACHE_HOME"] = os.path.join(work, "cache")
+                result = subprocess.run(
+                    [
+                        fusesoc,
+                        "--cores-root",
+                        os.path.abspath(destination_path),
+                        "run",
+                        "--setup",
+                        "--no-export",
+                        "--work-root",
+                        work,
+                        "--target",
+                        target,
+                        vlnv,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+                if result.returncode != 0:
+                    print_yellow(f"[DEPS] FuseSoC setup failed: {result.stderr[-500:]}")
+                    return False
+                edam_files = [
+                    os.path.join(work, name)
+                    for name in os.listdir(work)
+                    if name.endswith(".eda.yml")
+                ]
+                if not edam_files:
+                    return False
+                edam = yaml.safe_load(open(edam_files[0], encoding="utf-8")) or {}
+                source_files = []
+                for entry in edam.get("files", []):
+                    if entry.get("file_type") not in (
+                        "verilogSource",
+                        "systemVerilogSource",
+                        "vhdlSource",
+                    ):
+                        continue
+                    path = entry.get("name", "")
+                    if not os.path.isabs(path):
+                        path = os.path.abspath(os.path.join(work, path))
+                    if os.path.exists(path):
+                        source_files.append(path)
+                if source_files:
+                    with open(
+                        generated_flist,
+                        "w",
+                        encoding="utf-8",
+                    ) as flist:
+                        flist.write("\n".join(source_files) + "\n")
+                    print_green(
+                        f"[DEPS] ✓ FuseSoC resolved {len(source_files)} HDL files (target={target})"
+                    )
+                    return True
+        except (OSError, subprocess.TimeoutExpired, yaml.YAMLError) as exc:
+            print_yellow(f"[DEPS] FuseSoC setup error: {exc}")
         return False
 
     # No dependency manager detected

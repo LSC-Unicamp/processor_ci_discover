@@ -158,6 +158,15 @@ def is_micro_stage_name(name: str) -> bool:
         "iram",
         "halt",
         "machine",
+        # Common names for registers between classic five-stage pipelines.
+        "ifid",
+        "if_id",
+        "idex",
+        "id_ex",
+        "exmem",
+        "ex_mem",
+        "memwb",
+        "mem_wb",
     ]
     if normalized in exact_stage_names:
         return True

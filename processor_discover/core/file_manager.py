@@ -291,8 +291,12 @@ def should_exclude_file(file_path: str, base_directory: str = None) -> bool:
         "fpga",  # FPGA board-specific directories
     ]
 
+    path_components = {
+        component.lower()
+        for component in rel_path.replace("\\", "/").split("/")[:-1]
+    }
     for exclude_dir in verification_dirs:
-        if exclude_dir in rel_path:
+        if exclude_dir.lower() in path_components:
             return True
 
     # Exclude duplicated lib/lib directory (e.g., rtl/lib/lib/* in orv64)
@@ -394,7 +398,7 @@ def remove_repo(repo_name: str) -> None:
 
 
 def find_files_with_extension(
-    directory: str, extensions: list[str]
+    directory: str, extensions: list[str], exclude_filtered: bool = True
 ) -> tuple[list[str], str]:
     """Finds files with specific extensions in a directory.
 
@@ -419,7 +423,7 @@ def find_files_with_extension(
             if os.path.islink(file_path) and not os.path.exists(file_path):
                 continue
 
-            if not should_exclude_file(file_path, directory):
+            if not exclude_filtered or not should_exclude_file(file_path, directory):
                 files.append(file_path)
 
     if not files:

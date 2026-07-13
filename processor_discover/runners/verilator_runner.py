@@ -1029,6 +1029,30 @@ def _detect_language_for_files(
 
     # FIRST: Check for keyword conflicts (highest priority)
     # Plain Verilog code using SV keywords as identifiers must use Verilog mode
+    # Concurrent assertions are unambiguously SystemVerilog even when stored
+    # in legacy .v files. Detect them before the keyword-as-identifier check,
+    # which can otherwise mistake property syntax for plain Verilog names.
+    sva_pattern = re.compile(
+        r"\b(?:assert|assume|cover|restrict)\s+property\b|\b(?:property|sequence)\s+[A-Za-z_]",
+        re.I,
+    )
+    for file_rel in files_to_check:
+        file_path = file_rel if os.path.isabs(file_rel) else os.path.join(repo_root, file_rel)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as source:
+                if sva_pattern.search(source.read()):
+                    print_blue(f"[LANG DETECT] SVA syntax found in {file_rel}; using SystemVerilog")
+                    return "1800-2023"
+        except OSError:
+            continue
+
+    # Explicit SystemVerilog extensions take precedence over the heuristic
+    # keyword-conflict detector. Otherwise legitimate declarations such as
+    # `logic signed` can be mistaken for Verilog identifiers and force an
+    # invalid downgrade to 1364 mode.
+    if any(str(path).lower().endswith((".sv", ".svh")) for path in files_to_check):
+        return "1800-2023"
+
     has_keyword_conflict = _has_sv_keyword_as_identifier(
         repo_root, list(files_to_check)
     )
@@ -1501,7 +1525,7 @@ def compile_incremental(
     Returns:
         (return_code, log, final_files, final_include_dirs)
     """
-    if context is not None:
+    if context is not None and context.cache.get("dependency_manifest"):
         max_iterations = context.maximize_attempts or max_iterations
 
     # Convert repo_root to absolute path for consistent path operations
@@ -1516,6 +1540,19 @@ def compile_incremental(
     # Start with just the top module file
     current_files = [top_module_file]
     current_includes: Set[str] = set()
+
+    if context is not None:
+        for include_dir in context.include_dirs:
+            include_path = str(include_dir)
+            if not os.path.isabs(include_path):
+                include_path = os.path.join(repo_root, include_path)
+            include_path = os.path.abspath(include_path)
+            try:
+                relative_include = os.path.relpath(include_path, repo_root)
+            except ValueError:
+                continue
+            if not relative_include.startswith(".."):
+                current_includes.add(relative_include)
 
     # Add the directory containing the top module as an include directory
     top_dir = os.path.dirname(top_module_file)
@@ -1934,6 +1971,22 @@ def compile_incremental(
             if not mod_files:
                 print_red(f"[INCREMENTAL] ✗ Cannot find file for module: {mod_name}")
                 continue
+
+            # When repositories contain parallel ModelSim/Vivado/generated
+            # trees, prefer the declaration beside the selected top. Mixing
+            # duplicate module variants commonly produces positional-port
+            # mismatches even though either tree compiles on its own.
+            if isinstance(mod_files, list) and current_files:
+                top_parts = current_files[0].replace("\\", "/").split("/")
+                mod_files.sort(
+                    key=lambda path: -sum(
+                        1
+                        for left, right in zip(
+                            top_parts, path.replace("\\", "/").split("/")
+                        )
+                        if left == right
+                    )
+                )
 
             # Try candidates and get the best one with its dependencies
             best_candidate, candidate_deps = _try_module_candidates(

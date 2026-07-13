@@ -23,6 +23,8 @@ class RunContext:
     include_dirs: List[Path] = field(default_factory=list)
     module_files: List[Path] = field(default_factory=list)
     top_module_override: Optional[str] = None
+    top_file_override: Optional[Path] = None
+    dependency_target: Optional[str] = None
     no_llama: bool = False
     maximize_attempts: int = 6
     dry_run: bool = False
@@ -35,6 +37,8 @@ class RunContext:
             self.config_path = Path(self.config_path)
         if self.local_repo is not None and not isinstance(self.local_repo, Path):
             self.local_repo = Path(self.local_repo)
+        if self.top_file_override is not None and not isinstance(self.top_file_override, Path):
+            self.top_file_override = Path(self.top_file_override)
         self.include_dirs = [Path(p) for p in self.include_dirs]
         self.module_files = [Path(p) for p in self.module_files]
 
@@ -54,6 +58,8 @@ class RunContext:
             "include_dirs": [str(p) for p in self.include_dirs],
             "module_files": [str(p) for p in self.module_files],
             "top_module_override": self.top_module_override,
+            "top_file_override": str(self.top_file_override) if self.top_file_override is not None else None,
+            "dependency_target": self.dependency_target,
             "no_llama": self.no_llama,
             "maximize_attempts": self.maximize_attempts,
             "dry_run": self.dry_run,

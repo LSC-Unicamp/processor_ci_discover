@@ -67,6 +67,7 @@ from .pipeline import (
     clone_and_validate_repo,
     extract_and_log_modules,
     extract_repo_name,
+    extract_repo_owner,
     find_and_log_files,
     find_and_log_include_dirs,
     handle_dependency_manager,
@@ -83,6 +84,7 @@ from .top_selection import (
     _is_interface_module_name,
     _is_micro_stage_name,
     _is_peripheral_like_name,
+    _reachable_size,
     rank_top_candidates,
 )
 from ..lang.chisel_manager import process_chisel_project
@@ -238,6 +240,100 @@ def try_incremental_approach(
     """
     print_green(f"[INCREMENTAL] Trying bottom-up incremental approach for {repo_name}")
 
+    bender_files = context.cache.get("bender_files", []) if context else []
+    if bender_files and context and context.dependency_target and top_module_override:
+        manifest_files = []
+        for file_path in bender_files:
+            if os.path.isabs(file_path):
+                file_path = os.path.relpath(file_path, repo_root)
+            manifest_files.append(file_path)
+        manifest_includes = set(context.cache.get("bender_includes", []))
+        manifest_flags = list(verilator_extra_flags or [])
+        manifest_flags.extend(context.cache.get("bender_defines", []))
+        cmd = [
+            "verilator", "--lint-only", "-Wall", "--no-timing",
+            "--relative-includes", "--language", "1800-2023", "--sv",
+            "--top-module", top_module_override,
+        ]
+        cmd.extend(f"-I{path}" for path in sorted(manifest_includes))
+        cmd.extend(manifest_flags)
+        cmd.extend(manifest_files)
+        try:
+            result = subprocess.run(
+                cmd, cwd=repo_root, capture_output=True, text=True, timeout=timeout
+            )
+            manifest_log = result.stdout + result.stderr
+        except subprocess.TimeoutExpired as exc:
+            manifest_log = (exc.stdout or "") + (exc.stderr or "")
+            result = None
+        if result is not None and result.returncode == 0:
+            print_green(
+                f"[INCREMENTAL] ✓ Bender target '{context.dependency_target}' compiled successfully"
+            )
+            return (
+                manifest_files,
+                manifest_includes,
+                manifest_log + "\n[LANG-EFFECTIVE] 1800-2023 mode=sv",
+                top_module_override,
+                True,
+            )
+        print_yellow(
+            f"[INCREMENTAL] Bender target compile failed; trying dependency recovery"
+        )
+
+    # A source-file override identifies one exact top declaration.  Falling
+    # back to another module after that top fails can silently produce a config
+    # for an unrelated arithmetic unit in large multi-core repositories.
+    if (
+        context is not None
+        and context.top_file_override is not None
+        and top_module_override
+    ):
+        top_candidates = [top_module_override]
+
+    # A clean compile is not sufficient evidence that a module is a processor.
+    # In particular, pipeline registers and functional units are intentionally
+    # small and therefore tend to compile after the real CPU top has failed.
+    # Trying those candidates produces plausible-looking but unusable configs.
+    if top_candidates:
+        repo_token = re.sub(r"[^a-z0-9]", "", (repo_name or "").lower())
+
+        def _is_plausible_cpu_top(candidate: str) -> bool:
+            normalized = re.sub(r"[^a-z0-9]", "", candidate.lower())
+            core_named = any(
+                term in candidate.lower()
+                for term in ("cpu", "core", "processor", "risc")
+            )
+            repo_named = bool(
+                repo_token
+                and normalized
+                and (normalized == repo_token or normalized in repo_token)
+            )
+            # A processor-sized top normally reaches several architectural
+            # blocks.  A threshold of five avoids accepting tiny FIFOs, clock
+            # gates, branch units, and pipeline registers merely because they
+            # instantiate one or two helpers.
+            connected = _reachable_size(module_graph, candidate) >= 5
+            return (core_named or repo_named or connected) and not (
+                _is_peripheral_like_name(candidate)
+                or _is_functional_unit_name(candidate)
+                or _is_micro_stage_name(candidate)
+                or _is_interface_module_name(candidate)
+            )
+
+        filtered_candidates = [
+            candidate
+            for candidate in top_candidates
+            if candidate == top_module_override or _is_plausible_cpu_top(candidate)
+        ]
+        dropped = [c for c in top_candidates if c not in filtered_candidates]
+        if dropped:
+            print_yellow(
+                "[INCREMENTAL] Skipping non-CPU fallback candidates: "
+                + ", ".join(dropped)
+            )
+        top_candidates = filtered_candidates
+
     # Limit number of candidates to avoid excessive testing
     MAX_CANDIDATES_TO_TRY = 10
     if len(top_candidates) > MAX_CANDIDATES_TO_TRY:
@@ -252,6 +348,11 @@ def try_incremental_approach(
     module_to_file = {}
     for mname, mfile in modules or []:
         module_to_file[mname] = mfile
+    if context is not None and context.top_file_override is not None:
+        requested_file = str(context.top_file_override).replace("\\", "/")
+        for mname, mfile in modules or []:
+            if str(mfile).replace("\\", "/").endswith(requested_file):
+                module_to_file[mname] = mfile
 
     # Try each top candidate with incremental compilation
     for idx, top_module in enumerate(top_candidates, 1):
@@ -356,9 +457,31 @@ def interactive_simulate_and_minimize(
         if context.maximize_attempts:
             maximize_attempts = context.maximize_attempts
 
-    # Proactively drop any FPGA-related files from candidates to avoid board wrappers influencing top detection
-    candidate_files = [f for f in candidate_files if not _is_fpga_path(f)]
-    tb_files = [f for f in tb_files if not _is_fpga_path(f)]
+    if context is not None and context.top_file_override is not None:
+        requested_file = str(context.top_file_override).replace("\\", "/")
+        requested_root = os.path.dirname(requested_file)
+        if requested_root:
+            def _in_requested_tree(path: str) -> bool:
+                normalized = str(path).replace("\\", "/")
+                return normalized.startswith(requested_root + "/") or f"/{requested_root}/" in normalized
+
+            scoped_candidates = [f for f in candidate_files if _in_requested_tree(f)]
+            scoped_modules = [(m, f) for m, f in modules if _in_requested_tree(f)]
+            if scoped_candidates and scoped_modules:
+                candidate_files = scoped_candidates
+                tb_files = [f for f in tb_files if _in_requested_tree(f)]
+                modules = scoped_modules
+                print_yellow(f"[TOP] Scoped dependency discovery to source tree: {requested_root}/")
+
+    # Prefer non-board RTL when it exists, but some repositories keep their
+    # entire synthesizable core under fpga/src.  Dropping every such file made
+    # those repositories appear to contain no HDL at all.
+    non_fpga_candidates = [f for f in candidate_files if not _is_fpga_path(f)]
+    if non_fpga_candidates:
+        candidate_files = non_fpga_candidates
+        tb_files = [f for f in tb_files if not _is_fpga_path(f)]
+    elif candidate_files:
+        print_yellow("[FILTER] All candidate RTL is under FPGA paths; retaining it")
 
     # Filter out unit-test verification trees that frequently redefine parameters and test-only scaffolding
     def _is_unittest_path(p: str) -> bool:
@@ -387,6 +510,13 @@ def interactive_simulate_and_minimize(
     module_to_file = {}
     for mname, mfile in modules or []:
         module_to_file[mname] = mfile
+    if context is not None and context.top_file_override is not None:
+        requested_file = str(context.top_file_override).replace("\\", "/")
+        for mname, mfile in modules or []:
+            normalized_file = str(mfile).replace("\\", "/")
+            if normalized_file.endswith(requested_file):
+                module_to_file[mname] = mfile
+                print_yellow(f"[TOP] Using source-file override for {mname}: {requested_file}")
 
     # Determine primary top candidate and refine if it looks peripheral-like (AXI/memory/fabric)
     primary_top = candidates[0] if candidates else None
@@ -690,6 +820,9 @@ def generate_processor_config(
     local_repo: str = None,
     top_module_override: str | None = None,
     context: RunContext | None = None,
+    core_name: str | None = None,
+    top_file_override: str | None = None,
+    dependency_target: str | None = None,
 ) -> dict:
     """
     Main function to generate a processor configuration.
@@ -703,7 +836,31 @@ def generate_processor_config(
         model: OLLAMA model to use
         local_repo: Path to local repository (skips cloning if provided)
     """
-    repo_name = extract_repo_name(url)
+    repo_name = core_name or extract_repo_name(url)
+    if core_name is None:
+        existing_config = Path(config_path) / f"{repo_name}.json"
+        if existing_config.exists():
+            try:
+                existing_repository = json.loads(
+                    existing_config.read_text(encoding="utf-8")
+                ).get("repository", "")
+            except (OSError, json.JSONDecodeError):
+                existing_repository = ""
+            normalized_existing = existing_repository.rstrip("/")
+            normalized_url = url.rstrip("/")
+            if normalized_existing.endswith(".git"):
+                normalized_existing = normalized_existing[:-4]
+            if normalized_url.endswith(".git"):
+                normalized_url = normalized_url[:-4]
+            if existing_repository and normalized_existing != normalized_url:
+                owner = re.sub(
+                    r"[^a-zA-Z0-9_-]+", "_", extract_repo_owner(url)
+                ).strip("_").lower()
+                if owner:
+                    repo_name = f"{owner}_{repo_name}"
+                    print_yellow(
+                        f"[NAME] Config name collision; using '{repo_name}'"
+                    )
     run_context = context or build_run_context(
         repo_root=Path("."),
         repo_name=repo_name,
@@ -715,6 +872,8 @@ def generate_processor_config(
         add_to_config=add_to_config,
         no_llama=no_llama,
         top_module_override=top_module_override,
+        top_file_override=top_file_override,
+        dependency_target=dependency_target,
     )
     if context is not None:
         run_context.repo_name = repo_name
@@ -727,6 +886,8 @@ def generate_processor_config(
         run_context.top_module_override = (
             top_module_override or run_context.top_module_override
         )
+        run_context.top_file_override = Path(top_file_override) if top_file_override else run_context.top_file_override
+        run_context.dependency_target = dependency_target or run_context.dependency_target
         run_context.no_llama = no_llama if context is None else context.no_llama
 
     config_path = str(run_context.config_path or config_path)
@@ -739,8 +900,13 @@ def generate_processor_config(
     plot_graph = run_context.plot_graph
     add_to_config = run_context.add_to_config
 
-    # Use local repo if provided, otherwise clone
-    if local_repo and os.path.exists(local_repo):
+    # Use local repo if provided, otherwise clone.  Supplying -l is an explicit
+    # request not to clone, so a typo must be reported rather than silently
+    # changing the execution mode and accessing the network.
+    if local_repo and not os.path.exists(local_repo):
+        raise FileNotFoundError(f"Local repository path does not exist: {local_repo}")
+
+    if local_repo:
         # Check if local_repo is the actual repo or a parent directory containing it
         if os.path.isdir(os.path.join(local_repo, ".git")):
             # It's the actual repository
@@ -769,7 +935,10 @@ def generate_processor_config(
 
     # Handle dependency managers (Bender, FuseSoC, etc.)
     # This must be done BEFORE scanning for files since it fetches external dependencies
-    deps_fetched = handle_dependency_manager(destination_path, repo_name)
+    deps_fetched = handle_dependency_manager(
+        destination_path, repo_name, top_module_override, run_context.dependency_target
+    )
+    run_context.cache["dependency_manifest"] = deps_fetched
     if deps_fetched:
         print_green(f"[DEPS] Dependencies fetched - rescanning files and includes...")
 
@@ -866,10 +1035,19 @@ def generate_processor_config(
     tb_files, non_tb_files = categorize_files(files, repo_name, destination_path)
     # Exclude FPGA board wrapper trees from consideration to avoid picking board 'top' modules
     orig_tb, orig_non_tb = len(tb_files), len(non_tb_files)
-    tb_files = [f for f in tb_files if not _is_fpga_path(f)]
-    non_tb_files = [f for f in non_tb_files if not _is_fpga_path(f)]
-    removed_tb = orig_tb - len(tb_files)
-    removed_non_tb = orig_non_tb - len(non_tb_files)
+    non_fpga_hdl = [
+        f for f in (tb_files + non_tb_files) if not _is_fpga_path(f)
+    ]
+    if non_fpga_hdl:
+        tb_files = [f for f in tb_files if not _is_fpga_path(f)]
+        non_tb_files = [f for f in non_tb_files if not _is_fpga_path(f)]
+    elif tb_files or non_tb_files:
+        # FPGA path classification can also make synthesizable files look like
+        # testbench files. Move them back into the candidate RTL set.
+        non_tb_files = tb_files + non_tb_files
+        tb_files = []
+    removed_tb = max(0, orig_tb - len(tb_files))
+    removed_non_tb = max(0, orig_non_tb - len(non_tb_files))
     if removed_tb or removed_non_tb:
         print_yellow(
             f"[FILTER] Excluded FPGA paths -> tb:{removed_tb} non-tb:{removed_non_tb}"
@@ -886,18 +1064,32 @@ def generate_processor_config(
             )
             if not _is_fpga_path(rel):
                 filtered_modules.append((mname, mfile))
-        if len(filtered_modules) != len(modules):
+        if filtered_modules and len(filtered_modules) != len(modules):
             print_yellow(
                 f"[FILTER] Excluded {len(modules) - len(filtered_modules)} module entries from FPGA paths"
             )
-        modules = filtered_modules
+        if filtered_modules:
+            modules = filtered_modules
         # Keep modulename_list consistent for any downstream consumers
-        modulename_list = [
-            d for d in modulename_list if not _is_fpga_path(d.get("file", ""))
-        ]
+        if filtered_modules:
+            modulename_list = [
+                d for d in modulename_list if not _is_fpga_path(d.get("file", ""))
+            ]
     except Exception:
         pass
     include_dirs = find_and_log_include_dirs(destination_path)
+    fusesoc_flist = os.path.join(destination_path, ".fusesoc_flist")
+    if os.path.exists(fusesoc_flist):
+        with open(fusesoc_flist, encoding="utf-8") as flist:
+            manifest_include_dirs = {
+                os.path.dirname(line.strip())
+                for line in flist
+                if line.strip()
+            }
+        include_dirs = sorted(set(include_dirs) | manifest_include_dirs)
+        print_yellow(
+            f"[DEPS] Added {len(manifest_include_dirs)} FuseSoC source/include directories"
+        )
     run_context.include_dirs = [Path(include_dir) for include_dir in include_dirs]
 
     # If Bender was used, also scan .bender directory for includes and parse flist
@@ -940,11 +1132,28 @@ def generate_processor_config(
 
         # Also parse the flist for any additional includes
         bender_files, bender_includes = parse_bender_flist(destination_path)
+        if bender_files:
+            run_context.cache["bender_files"] = bender_files
+            defines = []
+            flist_path = os.path.join(destination_path, ".bender_flist")
+            try:
+                with open(flist_path, encoding="utf-8") as manifest:
+                    defines = list(
+                        dict.fromkeys(
+                            line.strip()
+                            for line in manifest
+                            if line.strip().startswith("+define+")
+                        )
+                    )
+            except OSError:
+                pass
+            run_context.cache["bender_defines"] = defines
         if bender_includes:
             print_yellow(
                 f"[DEPS] Adding {len(bender_includes)} include directories from Bender flist"
             )
             include_dirs.update(bender_includes)
+        run_context.cache["bender_includes"] = list(bender_includes)
         run_context.include_dirs = [Path(include_dir) for include_dir in include_dirs]
 
     module_graph, module_graph_inverse = build_and_log_graphs(
@@ -1089,6 +1298,9 @@ def generate_processor_config(
         language_version_out,
         is_simulable,
     )
+    if run_context.cache.get("bender_defines"):
+        output_json["extra_flags"] = run_context.cache["bender_defines"]
+        output_json["pre_script"] = "bender checkout"
 
     # Save configuration
     print_green("[LOG] Salvando configuração\n")

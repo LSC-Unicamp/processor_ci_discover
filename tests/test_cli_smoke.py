@@ -28,6 +28,8 @@ class CliSmokeTests(unittest.TestCase):
                 "--no-llama",
                 "--top-module",
                 "ExampleTop",
+                "--core-name",
+                "owner_repo",
             ]
         )
 
@@ -35,6 +37,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(args.config_path, "config/")
         self.assertTrue(args.no_llama)
         self.assertEqual(args.top_module, "ExampleTop")
+        self.assertEqual(args.core_name, "owner_repo")
 
     def test_build_parser_requires_processor_url(self) -> None:
         parser = build_parser()

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from processor_discover.core.config_generator import generate_processor_config
+from processor_discover.runners.verilator_runner import _detect_language_for_files
 
 
 @contextmanager
@@ -49,6 +50,74 @@ def write_vhdl_repo(repo_dir: Path) -> None:
 
 
 class HdlOrchestrationTests(unittest.TestCase):
+    def test_concurrent_assertion_in_v_file_uses_systemverilog(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_tmp:
+            source = Path(repo_tmp) / "assertions.v"
+            source.write_text(
+                "module core(input clk); assert property (@(posedge clk) 1'b1); endmodule\n",
+                encoding="utf-8",
+            )
+            language = _detect_language_for_files(repo_tmp, ["assertions.v"])
+
+        self.assertEqual(language, "1800-2023")
+
+    def test_missing_local_repo_does_not_fall_back_to_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "already-cloned-core"
+            with patch(
+                "processor_discover.core.config_generator.clone_and_validate_repo"
+            ) as clone:
+                with self.assertRaisesRegex(FileNotFoundError, str(missing)):
+                    generate_processor_config(
+                        "https://example.invalid/demo.git",
+                        tmpdir,
+                        no_llama=True,
+                        local_repo=str(missing),
+                    )
+
+            clone.assert_not_called()
+
+    def test_failed_cpu_top_does_not_fall_back_to_pipeline_register(self) -> None:
+        attempts = []
+
+        def verilator_side_effect(**kwargs):
+            attempts.append(kwargs["top_module"])
+            return 1, "cpu failed", [], set()
+
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as config_tmp,
+            temporary_cwd(),
+        ):
+            repo_dir = Path(repo_tmp)
+            (repo_dir / "core.sv").write_text(
+                "module CpuCore; MEMWB stage(); endmodule\n", encoding="utf-8"
+            )
+            (repo_dir / "memwb.sv").write_text(
+                "module MEMWB; endmodule\n", encoding="utf-8"
+            )
+
+            with (
+                patch(
+                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    return_value=False,
+                ),
+                patch(
+                    "processor_discover.core.config_generator.verilator_incremental",
+                    side_effect=verilator_side_effect,
+                ),
+            ):
+                config = generate_processor_config(
+                    "https://example.invalid/demo.git",
+                    config_tmp,
+                    no_llama=True,
+                    local_repo=str(repo_dir),
+                )
+
+        self.assertEqual(attempts, ["CpuCore"])
+        self.assertFalse(config["is_simulable"])
+        self.assertNotEqual(config["top_module"], "MEMWB")
+
     def test_valid_verilog_override_is_first_candidate(self) -> None:
         with (
             tempfile.TemporaryDirectory() as repo_tmp,

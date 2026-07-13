@@ -61,6 +61,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Force a specific top module (tried first, then falls back to heuristics on failure)",
     )
+    parser.add_argument(
+        "--core-name",
+        type=str,
+        default=None,
+        help="Override config and clone folder name (owner_repo is recommended for collisions)",
+    )
+    parser.add_argument(
+        "--top-file",
+        type=str,
+        default=None,
+        help="Select the source file when multiple files declare the requested top module",
+    )
+    parser.add_argument(
+        "--dependency-target",
+        type=str,
+        default=None,
+        help="Select a dependency-manager target (for example a Bender target)",
+    )
 
     return parser
 
@@ -84,6 +102,9 @@ def main(argv: list[str] | None = None) -> int | None:
             args.model,
             args.local_repo,
             args.top_module,
+            core_name=args.core_name,
+            top_file_override=args.top_file,
+            dependency_target=args.dependency_target,
         )
         print("Result: ")
         print(json.dumps(config, indent=4))
