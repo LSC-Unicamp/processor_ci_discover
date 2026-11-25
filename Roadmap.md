@@ -9,13 +9,13 @@
 
 Evolve ProcessorCI Discover from a tool that chooses one compilable configuration into a tool that **discovers candidate processor tops, builds and validates their configurations, preserves unsuccessful attempts, and produces actionable diagnostics** for downstream tools and future automated repair.
 
-The immediate priority is **candidate preservation without losing the current working heuristic fallback**. Longer-term priorities are reliable simulation validation, better top-selection accuracy, standardized outputs, reproducibility, broader HDL support, and an agent-driven repair workflow.
+The immediate priority is **candidate preservation without losing the current working heuristic fallback**. Configuration validation should follow RV-Bench's RTL validation methodology. Longer-term priorities are better top-selection accuracy, standardized outputs, reproducibility, broader HDL support, and an agent-driven repair workflow.
 
 ### Guiding principles
 
 1. **Preserve evidence:** A failed candidate is useful if its source set, compilation command, log, and failure reason are retained.
 2. **Keep working fallback:** Retaining failing candidates must not prevent Discover from finding a successful one.
-3. **Separate discovery from validation:** A plausible CPU top, an elaborated design, and a simulation-validated design are different states.
+3. **Separate discovery from validation:** A plausible CPU top, a config passing RV-Bench-style RTL validation, and a design proven by simulation are different states.
 4. **Maintain ProcessorCI compatibility:** Defaults and output fields required by the existing infrastructure remain available.
 5. **Do not treat merely compiling a module as proof it is the intended processor.**
 6. **Make outputs reproducible:** Record repository revision, source dependencies, flags, tools, and result status.
@@ -155,7 +155,7 @@ These defaults should be maintained across successful and failed candidate confi
 }
 ```
 
-*Illustrative partial configuration only.* The shown lint command is a **failed early-stage diagnostic command**, not a complete simulation validation workflow. The precise legacy keys must be checked against existing consumers before schema changes are merged.
+*Illustrative partial configuration only.* The shown lint command is a **failed diagnostic command**. The config validation gate follows RV-Bench's RTL validation methodology; it does not require a smoke simulation. The precise legacy keys must be checked against existing consumers before schema changes are merged.
 
 ---
 
@@ -220,7 +220,7 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 - [ ] Add an inspection-only candidate listing mode.
 - [ ] Create a fixed set of known-good and known-failing CPU-top cases.
 
-**Exit criteria:** Correct-top identification and correct-top simulation validation improve on pinned benchmarks, without selecting unrelated modules simply because they compile.
+**Exit criteria:** Correct-top identification and RV-Bench-style config validation improve on pinned benchmarks, without selecting unrelated modules simply because they compile.
 
 ### Phase 4 — Unified HDL/generator support (**P2**)
 
@@ -270,7 +270,7 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 | Area | Planned change |
 | --- | --- |
 | `core/api.py` | Candidate result/diagnostic structures |
-| `runners/verilator_runner.py` | Preserve per-attempt evidence; build and run real simulation validation |
+| `runners/verilator_runner.py` | Preserve per-attempt evidence; apply the RV-Bench-style Verilator lint gate to the resolved config |
 | `runners/ghdl_runner.py` | Preserve per-attempt evidence; clarify VHDL validation level |
 | `core/config_generator.py` | Separate requested, first-heuristic, and validated-fallback paths |
 | `core/output.py` | Serialize candidate configs, selected config and report |
@@ -335,7 +335,7 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 - [x] Ollama-specific integration is removed from the current core discovery workflow.
 - [ ] Regression tests exercise all three-candidate cases and no-success behavior.
 
-**Immediately following:** Implement simulator build and executable smoke validation so the tool's published success status reflects what truly ran.
+**Validation gate:** Match RV-Bench config validation: verify declared source files and include directories, then run Verilator lint for Verilog/SystemVerilog or GHDL analyze and elaborate for VHDL. Record the exact level passed. Generator projects require their generated RTL to exist before the applicable RTL tool check. Simulator execution may be evaluated separately; it is not required to publish a configuration validated by this gate.
 
 ---
 
@@ -349,18 +349,18 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 | Heuristic fallback | Continue independently to find a validated candidate |
 | `march` | Keep infrastructure default `rv32i`; mark as default, not detected ISA |
 | `two_memory` | Keep infrastructure default `false`; actual topology handling to be addressed in Wrapper |
-| Verilator | Lint-only is not enough for simulation validation; implement real build and smoke execution |
+| Config validation | Follow RV-Bench's source/include checks and language-specific RTL tool checks; report this as config validation, not simulation execution |
 | Ollama | Remove existing direct integration; consider an agent-neutral harness later |
 | Chisel/Bluespec | Experimental now; unify and harden after core reliability milestones |
 | Repair patches | Later, isolated, diff-based, revalidated, and optional |
 
 ## 10. Open design questions
 
-1. What precise validation level is required before a candidate may become the canonical `example_cpu.json`—`simulator_built` or `simulation_smoke_passed`? Prefer the latter when feasible; introduce an explicit blocked state when automatic harness creation is not yet possible.
+1. How should Discover share or mirror RV-Bench's config validation gate without diverging as either implementation evolves?
 2. How should failed candidate files be named so existing scripts scanning `configs/*.json` never mistake them for usable configurations? A dedicated `candidates/` subdirectory may be safer than the illustrative flat layout.
 3. Which existing downstream tools read `sim_files`, `files`, `is_simulable`, and other legacy fields directly? Lock down compatibility before schema migration.
 4. How should top-module identity incorporate project profile, parameters, macros, and source file, especially when duplicate module names exist?
-5. What is the minimum portable clock/reset test strategy before ProcessorCI Wrapper is involved?
+5. If simulation is evaluated separately, what portable clock/reset test strategy is appropriate before ProcessorCI Wrapper is involved?
 6. Which repository build scripts are safe to execute automatically, and what isolation/resource limits are required?
 
 These questions should be answered during Phases 1–2; they do **not** block creating a stable candidate-result/report structure first.
