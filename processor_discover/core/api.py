@@ -18,7 +18,7 @@ class CandidateResult:
     heuristic_rank : int
         Heuristic rank assigned by ``rank_top_candidates`` (1 = best).
     status : str
-        One of "success", "failure", "partial".
+        One of "compilation_success", "failure", "partial", "inconclusive".
     files : list[str]
         Final file list that was used to compile this candidate.
     include_dirs : list[str]
@@ -28,7 +28,7 @@ class CandidateResult:
     parameters : dict[str, Any]
         Any simulator-specific parameters.
     compile_command : list[str] | str
-        The exact compilation command (or command string) that was run.
+        The last compilation command run, or an empty string if none ran.
     exit_code : int | None
         Process exit code, or ``None`` when not available.
     errors : list[str]
@@ -46,7 +46,8 @@ class CandidateResult:
     include_dirs: List[str] = field(default_factory=list)
     extra_flags: List[str] = field(default_factory=list)
     parameters: Dict[str, Any] = field(default_factory=dict)
-    compile_command: str = ""
+    build_context: Dict[str, Any] = field(default_factory=dict)
+    compile_command: List[str] | str = ""
     exit_code: Optional[int] = None
     errors: List[str] = field(default_factory=list)
     log_path: Optional[str] = None
@@ -62,6 +63,7 @@ class CandidateResult:
             "include_dirs": self.include_dirs,
             "extra_flags": self.extra_flags,
             "parameters": self.parameters,
+            "build_context": self.build_context,
             "compile_command": self.compile_command,
             "exit_code": self.exit_code,
             "errors": self.errors,
@@ -96,6 +98,7 @@ class DiscoveryReport:
     candidates: List[CandidateResult] = field(default_factory=list)
     successful_candidate: Optional[CandidateResult] = None
     output_json: Optional[Dict[str, Any]] = None
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -109,6 +112,7 @@ class DiscoveryReport:
                 else None
             ),
             "output_json": self.output_json,
+            "provenance": self.provenance,
         }
 
 

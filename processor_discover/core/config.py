@@ -131,7 +131,7 @@ def is_usable_config(config_data: dict) -> bool:
     if discovery.get("candidate_status") in ("failure", "partial", "inconclusive"):
         return False
     gate = discovery.get("validation_gate")
-    if gate is not None and (not isinstance(gate, dict) or gate.get("passed") is not True):
+    if not isinstance(gate, dict) or gate.get("passed") is not True:
         return False
 
     return True

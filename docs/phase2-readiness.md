@@ -6,19 +6,19 @@ Checked against `Roadmap.md` after Phase 1 merge. The roadmap marks only behavio
 
 | Gap | Current evidence | Completion check |
 | --- | --- | --- |
-| Candidate identity | Verilator and GHDL deduplicate by top and file; build flags, parameters, and source context are excluded. | Distinct build contexts remain distinct; identical contexts merge requested and heuristic roles. |
+| Candidate identity follow-up | Verilator and GHDL now use top, source set, includes, flags, parameters, and build context; duplicate roles merge. | Add a stable serialized candidate ID and test multi-target repositories with real tools. |
 | Candidate export follow-up | The HDL finalizer now selects at most three role-bearing configs while retaining all attempts in the report. Generated-language paths still use their own one-candidate writer. | Unify these writers and prove stale output cleanup across repeated runs. |
-| Full attempt evidence | Some early failures have no command or log; Verilog and VHDL paths use different log locations. | Every attempt, including a missing requested top and timeout, has source/include data, command when executed, status, and a durable log or explicit no-command reason. |
-| Explicit validation levels | Results use `compilation_success` and `failure`; inconclusive conditions are not consistently represented. | Config validation, failed validation, and blocked/timeout outcomes are separate and never reported as simulation execution. |
-| Default provenance | Canonical and candidate outputs now carry `march=rv32i` and `two_memory=false`; generated-language outputs mark default provenance, while RTL outputs do not yet. | All exported paths mark whether each value was inferred, supplied, or defaulted. |
-| Regression matrix | Tests now cover requested=first-heuristic dedup and three distinct exports, plus a focused VHDL failure case. | Add VHDL no-success and downstream compatibility fixtures. |
+| Full attempt evidence | Verilog and VHDL attempts now write under one discovery log tree, including missing requested tops and timeouts. A few early failures lack a formal no-command reason, and the report records only the last command of incremental retries. | Every attempt has complete source/include data, every executed command, status, and a durable log or explicit no-command reason. |
+| Validation detail | HDL and generated RTL paths now distinguish compilation success, failure, and timeout/inconclusive. | Add a stable validation-level enum and separate unavailable-tool, interrupted, and resource-limit outcomes. |
+| Default provenance follow-up | Canonical, role-selected candidates, and generated-language outputs mark `march=rv32i` and `two_memory=false` as defaults. | Verify downstream consumers accept these fields and support explicit overrides when introduced. |
+| Regression matrix | Tests cover requested=first-heuristic dedup, three distinct exports, VHDL no-success, and a real GHDL analyze/elaborate fixture. | Add pinned RV-Bench cases, downstream compatibility fixtures, and multi-target real-tool cases. |
 
 ## Phase 2 implementation order
 
-1. Define a versioned report contract with candidate identity, immutable attempt IDs, repository commit/dirty state, tool versions, commands, and source paths. Add a JSON schema and serialization tests.
+1. Finish the versioned report contract. Reports now record repository commit/dirty state and available Verilator/GHDL versions; add immutable attempt IDs, generator versions, a JSON schema, and serialization tests. Pin source revisions for reproducible reruns. GHDL commands currently reference a temporary work directory that is removed after validation, so record portable replay inputs as well.
 2. Normalize common HDL diagnostics into categories with file/line, source context, candidate ID, and recovery class. Keep raw logs intact.
 3. Make per-attempt timeout and total candidate budget explicit; record timeout/interruption rather than collapsing them into compile failure.
 4. Isolate repository preparation scripts in a bounded workspace with a documented execution policy.
 5. Add stable CLI JSON/text modes and documented exit codes for validated, no-success, blocked, and tool failure.
 
-No Phase 2 checkbox is marked complete yet; the merged implementation supplies foundations but not the complete exit criteria above.
+No Phase 2 checkbox is marked complete yet; this preparation branch adds foundations but not the complete exit criteria above.

@@ -14,9 +14,10 @@ def candidate_identity(candidate: CandidateResult) -> tuple:
         candidate.top_module,
         candidate.top_file,
         tuple(candidate.files),
-        tuple(candidate.include_dirs),
+        tuple(sorted(candidate.include_dirs)),
         tuple(candidate.extra_flags),
         json.dumps(candidate.parameters, sort_keys=True, default=str),
+        json.dumps(candidate.build_context, sort_keys=True, default=str),
     )
 
 
@@ -58,14 +59,19 @@ def export_candidates(config_path: str, repo_name: str, url: str, language_versi
             "heuristic_rank": candidate.heuristic_rank,
             "top_file": candidate.top_file,
             "parameters": candidate.parameters,
+            "build_context": candidate.build_context,
             "compile_command": candidate.compile_command,
             "exit_code": candidate.exit_code,
             "errors": list(candidate.errors),
             "log_file": candidate.log_path,
+            "validation_gate": {
+                "passed": candidate.status == "compilation_success",
+                "level": "hdl_tool_validation" if candidate.status == "compilation_success" else "none",
+            },
             "defaults": {"march": "default", "two_memory": "default"},
         }
         safe_top = re.sub(r"[^a-zA-Z0-9_]", "_", candidate.top_module or "unknown")
-        filename = output_dir / f"{repo_name}_{safe_top}_{'success' if candidate.status == 'compilation_success' else 'attempt' + str(index)}.json"
+        filename = output_dir / f"{repo_name}_{safe_top}_{index}.json"
         filename.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
         written.append(str(filename))
     return written

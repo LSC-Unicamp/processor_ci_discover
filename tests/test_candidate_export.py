@@ -34,3 +34,13 @@ def test_identity_includes_build_context_and_shared_roles_export_once(tmp_path):
     assert candidate_identity(requested) != candidate_identity(other_context)
     files = export_candidates(str(tmp_path), "demo", "url", "1800-2023", [requested])
     assert len(files) == 1
+
+
+def test_distinct_validated_build_contexts_do_not_overwrite(tmp_path):
+    requested = candidate("CpuCore", "requested", "compilation_success", ["core.sv"])
+    requested.build_context = {"target": "a"}
+    heuristic = candidate("CpuCore", "first_heuristic", "compilation_success", ["core.sv"])
+    heuristic.build_context = {"target": "b"}
+    files = export_candidates(str(tmp_path), "demo", "url", "1800-2023", [requested, heuristic])
+    assert len(files) == len(set(files)) == 2
+    assert all(__import__("pathlib").Path(path).is_file() for path in files)

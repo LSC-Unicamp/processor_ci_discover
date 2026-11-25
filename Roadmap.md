@@ -2,7 +2,7 @@
 
 **Project:** [ProcessorCI Discover](https://github.com/LSC-Unicamp/processor_ci_discover)  
 **Scope:** Discovery, validation, diagnostics, and generation of processor build configurations for the ProcessorCI suite and RV-Bench.  
-**Status:** Phase 1 implementation under review; Phase 2 preparation
+**Status:** Phase 1 merged; follow-up completion and Phase 2 preparation
 **Last revised:** 2026-11-25
 
 ## 1. Purpose and direction
@@ -184,16 +184,16 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 
 ### Phase 1 — Multi-candidate preservation and result model (**P0**)
 
-- [ ] Define candidate identity, roles, statuses, and deduplication rules.
+- [x] Define candidate identity, roles, statuses, and deduplication rules.
 - [x] Introduce a common `CandidateResult`/attempt structure.
 - [ ] Preserve failed Verilator and GHDL candidate source sets and logs.
-- [ ] Evaluate the supplied top independently of heuristic ranking.
-- [ ] Preserve the initial heuristic top even when it fails.
+- [x] Evaluate the supplied top independently of heuristic ranking.
+- [x] Preserve the initial heuristic top even when it fails.
 - [x] Continue heuristic fallback to the first validation-successful top.
 - [x] Export at most three distinct candidate configs and a full attempt report.
 - [x] Ensure failed configs cannot enter the usable-config index.
 - [x] Retain `march=rv32i` and `two_memory=false` defaults.
-- [ ] Add regression tests for requested top, first heuristic, fallback, no-success, deduplication and output compatibility.
+- [x] Add regression tests for requested top, first heuristic, fallback, no-success, deduplication and output compatibility.
 
 **Exit criteria:** Every relevant path is preserved; normal fallback still works; downstream consumers continue to receive an unambiguous usable config when available.
 
@@ -326,12 +326,12 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 
 **Prioritize this milestone before broader language expansion or agent development.**
 
-- [ ] Requested top always has a retained complete or partial candidate result.
-- [ ] First heuristic top has an independent retained result.
+- [x] Requested top always has a retained complete or partial candidate result.
+- [x] First heuristic top has an independent retained result.
 - [x] Fallback continues until the first candidate meeting the required validation gate or the search budget ends.
 - [x] No more than three distinct candidate configurations are exported.
 - [ ] Full attempt history and diagnostic logs are retained.
-- [ ] Successful, failed and inconclusive validation are explicitly distinguished.
+- [x] Successful, failed and inconclusive validation are explicitly distinguished.
 - [x] Existing canonical usable-config path and required downstream fields remain compatible.
 - [x] `march` defaults to `rv32i`; `two_memory` defaults to `false` pending later Wrapper work.
 - [x] Ollama-specific integration is removed from the current core discovery workflow.

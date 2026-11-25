@@ -29,6 +29,7 @@ import time
 
 from ..utils.log import print_green, print_yellow, print_red, print_blue
 from ..core.api import RunContext, CandidateResult
+from ..core.candidate_export import candidate_identity
 
 
 def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str]:
@@ -823,7 +824,7 @@ def compile_incremental(
     try:
         current_files = [top_entity_file]
         added_files_history = set([top_entity_file])
-        last_cmd = f"ghdl -a --work={work_library or 'work'} {top_entity_file}"
+        last_cmd = []
 
         # Detect and filter out vendor-specific files
         vendor_files = _detect_vendor_libraries([top_entity_file], repo_root)
@@ -831,7 +832,6 @@ def compile_incremental(
             print_red(
                 f"[GHDL-INCREMENTAL] ✗ Top entity file uses vendor-specific libraries, cannot compile with GHDL"
             )
-            last_cmd = f"ghdl -a --work={work_library or 'work'} {top_entity_file}"
             return (
                 1,
                 "Top entity file contains vendor-specific libraries incompatible with GHDL",
@@ -871,6 +871,7 @@ def compile_incremental(
                 work_library,
                 repo_root,
             )
+            last_cmd = cmd
 
             print_blue(f"[GHDL-INCREMENTAL] Files: {', '.join(ordered_files)}")
 
@@ -889,6 +890,7 @@ def compile_incremental(
                     ordered_files,
                     repo_root,
                 )
+                last_cmd = elab_cmd
                 rc_elab, output_elab = _run(elab_cmd, repo_root, timeout)
 
                 if rc_elab == 0:
@@ -915,6 +917,7 @@ def compile_incremental(
                 cmd = _build_ghdl_cmd(
                     reordered_files, top_entity, workdir, ghdl_extra_flags, work_library
                 )
+                last_cmd = cmd
                 rc, output = _run(cmd, repo_root, timeout)
 
                 # Mark files as dependency-ordered so we preserve this order in next iteration
@@ -928,13 +931,13 @@ def compile_incremental(
                     elab_cmd = _build_elab_cmd(
                         top_entity, workdir, ghdl_extra_flags, work_library
                     )
+                    last_cmd = elab_cmd
                     rc_elab, output_elab = _run(elab_cmd, repo_root, timeout)
 
                     if rc_elab == 0:
                         print_green(
                             f"[GHDL-INCREMENTAL] ✓ Elaboration successful after reordering!"
                         )
-                        last_cmd = cmd
                         return rc_elab, output + "\n" + output_elab, current_files, [], last_cmd
 
                     # Elaboration failed - parse errors
@@ -1190,6 +1193,27 @@ def incremental_compilation(
             print_yellow(
                 f"[GHDL-INCREMENTAL] Could not find file for entity '{candidate}'"
             )
+            if context is not None:
+                roles = ["requested"] if candidate == context.top_module_override else ["first_heuristic" if idx == 1 else "fallback"]
+                message = f"Entity '{candidate}' was not found in the source list"
+                log_path = None
+                if context.config_path:
+                    log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, f"ghdl-attempt-{idx}.log")
+                    with open(log_path, "w", encoding="utf-8") as log_file:
+                        log_file.write(message + "\n")
+                context.candidates.append(CandidateResult(
+                    top_module=candidate, roles=roles, status="failure",
+                    errors=[message], log_path=log_path,
+                ))
+                if context.config_path:
+                    from ..core.config import save_failed_candidate_config
+                    from ..core.output import create_output_json
+
+                    partial = create_output_json(repo_name, context.repository_url or "", [], [], candidate, "08", False)
+                    partial["discovery"] = {"has_successful_candidate": False, "candidate_status": "failure", "roles": roles, "errors": [message]}
+                    save_failed_candidate_config(str(context.config_path), partial, repo_name, top_module=candidate, attempt_index=idx)
             continue
 
         top_entity_file = entity_files[0]
@@ -1214,16 +1238,23 @@ def incremental_compilation(
         )
         if not os.path.exists(full_path):
             print_yellow(f"[GHDL-INCREMENTAL] ✗ File does not exist: {full_path}")
+            if context is not None:
+                roles = ["requested"] if candidate == context.top_module_override else ["first_heuristic" if candidate == context.cache.get("heuristic_first_top") else "fallback"]
+                message = f"Missing source file: {top_entity_file}"
+                log_path = None
+                if context.config_path:
+                    log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, f"missing-source-{idx}.log")
+                    with open(log_path, "w", encoding="utf-8") as log_file:
+                        log_file.write(message + "\n")
+                context.candidates.append(CandidateResult(
+                    top_module=candidate, top_file=top_entity_file, roles=roles,
+                    status="failure", files=[top_entity_file], errors=[message], log_path=log_path,
+                ))
             continue
 
         print_green(f"[GHDL-INCREMENTAL] ✓ File exists: {full_path}")
-
-        # Deduplication key: (candidate, top_entity_file)
-        dedup_key = (candidate, top_entity_file)
-        _ghdl_already_seen = context is not None and any(
-            c.top_module == dedup_key[0] and c.top_file == dedup_key[1]
-            for c in context.candidates
-        )
 
         # Try incremental compilation
         rc, log, final_files, _include_dirs, last_cmd = compile_incremental(
@@ -1236,6 +1267,19 @@ def incremental_compilation(
             timeout=timeout,
             context=context,
         )
+        build_context = {
+            "dependency_target": context.dependency_target if context else None,
+            "language_version": context.language_version if context else "08",
+        }
+        identity_files = [os.path.relpath(f, repo_root) if os.path.isabs(f) else f for f in final_files]
+        attempt_key = candidate_identity(CandidateResult(
+            top_module=candidate, top_file=top_entity_file, files=identity_files,
+            extra_flags=list(ghdl_extra_flags or []), build_context=build_context,
+        ))
+        _ghdl_existing = next(
+            (prior for prior in context.candidates if candidate_identity(prior) == attempt_key),
+            None,
+        ) if context else None
 
         # Keep heuristic identity independent of an explicit request.
         requested = bool(context and candidate == context.top_module_override)
@@ -1269,7 +1313,9 @@ def incremental_compilation(
                 else:
                     normalized_files.append(f)
             # Record the successful candidate (only if not already recorded)
-            if not _ghdl_already_seen and context is not None:
+            if _ghdl_existing is not None:
+                _ghdl_existing.roles = list(dict.fromkeys(_ghdl_existing.roles + roles))
+            elif context is not None:
                 context.candidates.append(
                     CandidateResult(
                         top_module=candidate,
@@ -1281,6 +1327,7 @@ def incremental_compilation(
                         include_dirs=[],
                         extra_flags=list(ghdl_extra_flags or []),
                         parameters={},
+                        build_context=build_context,
                         compile_command=last_cmd,
                         exit_code=0,
                         errors=[],
@@ -1292,18 +1339,21 @@ def incremental_compilation(
             continue
 
         # Record failure candidate (only if not already recorded)
-        if not _ghdl_already_seen and context is not None:
+        if _ghdl_existing is not None:
+            _ghdl_existing.roles = list(dict.fromkeys(_ghdl_existing.roles + roles))
+        elif context is not None:
             context.candidates.append(
                 CandidateResult(
                     top_module=candidate,
                     top_file=top_entity_file,
                     roles=roles,
                     heuristic_rank=rank,
-                    status="failure",
+                    status="inconclusive" if "[TIMEOUT]" in (log or "") else "failure",
                     files=list(final_files),
                     include_dirs=[],
                     extra_flags=list(ghdl_extra_flags or []),
                     parameters={},
+                    build_context=build_context,
                     compile_command=last_cmd,
                     exit_code=rc,
                     errors=[line.strip() for line in log.splitlines() if "error" in line.lower()] or log.splitlines()[-5:],
@@ -1320,7 +1370,7 @@ def incremental_compilation(
                 )
                 failed_config["discovery"] = {
                     "has_successful_candidate": False,
-                    "candidate_status": "failure",
+                    "candidate_status": "inconclusive" if "[TIMEOUT]" in (log or "") else "failure",
                     "roles": roles,
                     "validation_level": "ghdl_analyze_or_elaborate",
                 }
