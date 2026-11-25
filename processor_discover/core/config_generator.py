@@ -67,6 +67,7 @@ from .file_manager import (
 )
 from .graph import plot_processor_graph, build_module_graph
 from .output import create_output_json, build_discovery_report, save_discovery_report
+from .candidate_export import candidate_identity, export_candidates
 from ..lang.bluespec_manager import find_bsv_files
 from ..lang.chisel_manager import find_scala_files
 from ..utils.log import print_green, print_red, print_yellow
@@ -92,6 +93,60 @@ from ..runners.verilator_runner import (
 from ..runners.ghdl_runner import (
     incremental_compilation as ghdl_incremental,
 )
+
+
+def normalize_generated_config(config: dict, repo_root: str | None = None) -> dict:
+    """Apply the shared contract and validate generated RTL when a checkout is available."""
+    config["schema_version"] = "2.0"
+    config["sim_files"] = list(config.get("sim_files") or config.get("files") or [])
+    config.setdefault("march", "rv32i")
+    config.setdefault("two_memory", False)
+    generated = bool(config.get("is_simulable") and config["sim_files"] and config.get("top_module"))
+    success = False
+    status = "failure"
+    evidence = "generator did not produce a complete RTL configuration"
+    command = []
+    if generated and repo_root:
+        missing = [path for path in config["sim_files"] if not os.path.isfile(os.path.join(repo_root, path))]
+        if missing:
+            evidence = f"missing generated source: {missing[0]}"
+        elif not shutil.which("verilator"):
+            status = "inconclusive"
+            evidence = "Verilator is unavailable for generated RTL validation"
+        else:
+            command = ["verilator", "--lint-only", "--no-timing", "-Wno-fatal", "--top-module", config["top_module"]]
+            command += [f"-I{path}" for path in config.get("include_dirs", [])]
+            command += list(config.get("extra_flags", []))
+            command += list(config["sim_files"])
+            try:
+                result = subprocess.run(command, cwd=repo_root, capture_output=True, text=True, timeout=240)
+                success = result.returncode == 0
+                status = "compilation_success" if success else "failure"
+                evidence = (result.stderr or result.stdout or "Verilator lint completed").strip()
+            except subprocess.TimeoutExpired:
+                status = "inconclusive"
+                evidence = "Verilator lint timed out after 240 seconds"
+    config["is_simulable"] = success
+    config["discovery"] = {
+        "schema_version": "2.0",
+        "has_successful_candidate": success,
+        "candidate_status": status,
+        "defaults": {"march": "default", "two_memory": "default"},
+        "validation_gate": {"passed": success, "level": "verilator_lint" if command else "none", "command": command, "evidence": evidence},
+    }
+    return config
+
+
+def missing_config_inputs(repo_root: str, files: list[str], include_dirs: list[str]) -> list[str]:
+    """Apply RV-Bench's source and include existence checks before publishing."""
+    missing = []
+    for file_path in files:
+        if not os.path.isfile(os.path.join(repo_root, file_path)):
+            missing.append(f"Missing source file: {file_path}")
+    for include_dir in include_dirs:
+        if not os.path.isdir(os.path.join(repo_root, include_dir)):
+            missing.append(f"Missing include directory: {include_dir}")
+    return missing
 
 # Top-selection helpers live in processor_discover.core.top_selection.
 
@@ -320,7 +375,9 @@ def try_incremental_approach(
         filtered_candidates = [
             candidate
             for candidate in top_candidates
-            if candidate == top_module_override or _is_plausible_cpu_top(candidate)
+            if candidate == top_module_override
+            or (context is not None and candidate == context.cache.get("heuristic_first_top"))
+            or _is_plausible_cpu_top(candidate)
         ]
         dropped = [c for c in top_candidates if c not in filtered_candidates]
         if dropped:
@@ -362,7 +419,9 @@ def try_incremental_approach(
     first_success: tuple | None = None
     _first_success_roles: list[str] | None = None
     # Track independent heuristic rank for non-override candidates (Blocker 2).
-    heuristic_rank = 0
+    heuristic_rank = int(bool(
+        has_override and context.cache.get("heuristic_first_top") == context.top_module_override
+    ))
 
     for idx, top_module in enumerate(top_candidates, 1):
         print_green(
@@ -373,6 +432,14 @@ def try_incremental_approach(
             # If this was an explicitly requested top, record the failure
             # and save a failed config so it is exported (Blocker 3 residual).
             if has_override and top_module == context.top_module_override and context is not None:
+                message = f"Module '{top_module}' not found in module list"
+                missing_log = None
+                if context.config_path is not None:
+                    log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    missing_log = os.path.join(log_dir, f"{top_module}_attempt.log")
+                    with open(missing_log, "w", encoding="utf-8") as log_file:
+                        log_file.write(message + "\n")
                 context.candidates.append(
                     CandidateResult(
                         top_module=top_module,
@@ -384,10 +451,10 @@ def try_incremental_approach(
                         include_dirs=[],
                         extra_flags=list(verilator_extra_flags or []),
                         parameters={},
-                        compile_command="verilator --top-module " + top_module,
-                        exit_code=1,
-                        errors=[f"Module '{top_module}' not found in module list"],
-                        log_path=None,
+                        compile_command="",
+                        exit_code=None,
+                        errors=[message],
+                        log_path=missing_log,
                     )
                 )
                 if context.config_path is None:
@@ -444,24 +511,23 @@ def try_incremental_approach(
         if not os.path.exists(full_path):
             print_red(f"[INCREMENTAL] ERROR: File does not exist: {full_path}")
             print_red(f"[INCREMENTAL] Skipping {top_module}")
+            if context is not None:
+                roles = ["requested"] if top_module == context.top_module_override else ["first_heuristic" if top_module == context.cache.get("heuristic_first_top") else "fallback"]
+                message = f"Missing source file: {top_module_file}"
+                log_path = None
+                if context.config_path is not None:
+                    log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, f"missing-source-{idx}.log")
+                    with open(log_path, "w", encoding="utf-8") as log_file:
+                        log_file.write(message + "\n")
+                context.candidates.append(CandidateResult(
+                    top_module=top_module, top_file=top_module_file, roles=roles,
+                    status="failure", files=[top_module_file], errors=[message], log_path=log_path,
+                ))
             continue
         else:
             print_green(f"[INCREMENTAL] ✓ File exists: {full_path}")
-
-        # Deduplication key: (top_module, top_file).
-        # Prevents recording the same candidate twice when the loop
-        # is called from multiple discovery paths.
-        dedup_key = (top_module, top_module_file)
-
-        # Check if this candidate was already recorded (e.g. by a prior
-        # pass through try_incremental_approach or ghdl_incremental).
-        # If found, merge the new role into the existing entry (Blocker 2).
-        _existing_idx: int | None = None
-        if context is not None:
-            for _i, _c in enumerate(context.candidates):
-                if _c.top_module == dedup_key[0] and _c.top_file == dedup_key[1]:
-                    _existing_idx = _i
-                    break
 
         rc, log, final_files, final_includes, _verilator_last_cmd = verilator_incremental(
             repo_root=repo_root,
@@ -482,46 +548,71 @@ def try_incremental_approach(
             context=context,
         )
 
+        build_context = {
+            "dependency_target": context.dependency_target if context else None,
+            "language_version": language_version,
+        }
+        attempt_key = candidate_identity(CandidateResult(
+            top_module=top_module, top_file=top_module_file,
+            files=list(final_files), include_dirs=list(final_includes),
+            extra_flags=list(verilator_extra_flags or []), build_context=build_context,
+        ))
+        _existing_idx = next(
+            (i for i, prior in enumerate(context.candidates) if candidate_identity(prior) == attempt_key),
+            None,
+        ) if context else None
+
         # Determine the role / provenance for this candidate.
         # Blocker 2 fix: the override candidate is separate from heuristics.
         # Non-override candidates track their own independent rank.
         if has_override and top_module == context.top_module_override:
             role = "requested"
-            heuristic_rank = 0  # override candidates don't have a heuristic rank
+            requested_rank = 1 if context.cache.get("heuristic_first_top") == top_module else 0
         else:
             heuristic_rank += 1
             role = "first_heuristic" if heuristic_rank == 1 else "fallback"
+        roles = [role]
+        if context is not None and context.cache.get("heuristic_first_top") == top_module and "first_heuristic" not in roles:
+            roles.append("first_heuristic")
 
         if rc == 0:
             print_green(f"[INCREMENTAL] ✓ Success with top module: {top_module}")
+            success_log_path = None
+            if context is not None and context.config_path is not None:
+                log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+                os.makedirs(log_dir, exist_ok=True)
+                success_log_path = os.path.join(log_dir, f"verilator-attempt-{idx}.log")
+                with open(success_log_path, "w", encoding="utf-8") as log_file:
+                    log_file.write(log or "")
             # Record the successful candidate. If already seen, merge the role
             # instead of duplicating (Blocker 2).
             if _existing_idx is not None and context is not None:
-                context.candidates[_existing_idx].roles.append(role)
+                context.candidates[_existing_idx].roles = list(dict.fromkeys(context.candidates[_existing_idx].roles + roles))
             else:
                 if context is not None:
                     context.candidates.append(
                         CandidateResult(
                             top_module=top_module,
                             top_file=top_module_file,
-                            roles=[role],
-                            heuristic_rank=heuristic_rank,
+                            roles=roles,
+                            heuristic_rank=requested_rank if role == "requested" else heuristic_rank,
                             status="compilation_success",
                             files=list(final_files),
                             include_dirs=list(final_includes),
                             extra_flags=list(verilator_extra_flags or []),
                             parameters={},
+                            build_context=build_context,
                             compile_command=_verilator_last_cmd,
                             exit_code=0,
                             errors=[],
-                            log_path=None,
+                            log_path=success_log_path,
                         )
                     )
             # Record the first successful candidate and continue trying
             # remaining heuristic candidates before returning (Blocker 1).
             if first_success is None:
                 first_success = (final_files, final_includes, log, top_module, True)
-                _first_success_roles = [role]
+                _first_success_roles = roles
         else:
             # Capture diagnostics from the runner log for the failure report.
             error_lines = []
@@ -538,12 +629,12 @@ def try_incremental_approach(
                 error_lines = log.splitlines()[-5:]
 
             failure_log_path = None
-            if context is not None:
-                discovery_dir = os.path.join("discovery", repo_name, "logs")
+            if context is not None and context.config_path is not None:
+                discovery_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
                 os.makedirs(discovery_dir, exist_ok=True)
                 safe_top = re.sub(r"[^a-zA-Z0-9_]", "_", top_module or "unknown")
                 failure_log_path = os.path.join(
-                    discovery_dir, f"{safe_top}_attempt.log"
+                    discovery_dir, f"{safe_top}_attempt-{idx}.log"
                 )
                 try:
                     with open(failure_log_path, "w", encoding="utf-8") as lf:
@@ -554,20 +645,21 @@ def try_incremental_approach(
             # Record failure candidate. If already seen, merge the role
             # instead of duplicating (Blocker 2).
             if _existing_idx is not None and context is not None:
-                context.candidates[_existing_idx].roles.append(role)
+                context.candidates[_existing_idx].roles = list(dict.fromkeys(context.candidates[_existing_idx].roles + roles))
             else:
                 if context is not None:
                     context.candidates.append(
                         CandidateResult(
                             top_module=top_module,
                             top_file=top_module_file,
-                            roles=[role],
-                            heuristic_rank=heuristic_rank,
-                            status="failure",
+                            roles=roles,
+                            heuristic_rank=requested_rank if role == "requested" else heuristic_rank,
+                            status="inconclusive" if "[TIMEOUT]" in (log or "") else "failure",
                             files=list(final_files),
                             include_dirs=list(final_includes),
                             extra_flags=list(verilator_extra_flags or []),
                             parameters={},
+                            build_context=build_context,
                             compile_command=_verilator_last_cmd,
                             exit_code=rc,
                             errors=error_lines,
@@ -589,7 +681,7 @@ def try_incremental_approach(
                 output_cfg["discovery"] = {
                     "schema_version": "2.0",
                     "has_successful_candidate": False,
-                    "candidate_status": "failure",
+                    "candidate_status": "inconclusive" if "[TIMEOUT]" in (log or "") else "failure",
                     "candidate_count": len(context.candidates),
                     "max_candidates": context.max_candidates,
                 }
@@ -711,6 +803,8 @@ def interactive_simulate_and_minimize(
     )
     if not candidates:
         candidates = [m for m, _ in modules] if modules else []
+    if context is not None:
+        context.cache["heuristic_first_top"] = candidates[0] if candidates else None
 
     # Build module->file map
     module_to_file = {}
@@ -833,6 +927,9 @@ def interactive_simulate_and_minimize(
         and not _is_interface_module_name(c)
     ]
     if non_periph_verilog:
+        first_heuristic = context.cache.get("heuristic_first_top") if context else None
+        if first_heuristic in verilog_candidates and first_heuristic not in non_periph_verilog:
+            non_periph_verilog.insert(0, first_heuristic)
         # Preserve order and keep primary_top first when present
         if primary_top in non_periph_verilog:
             non_periph_verilog = [primary_top] + [
@@ -853,6 +950,9 @@ def interactive_simulate_and_minimize(
         and not _is_interface_module_name(c)
     ]
     if non_periph_vhdl:
+        first_heuristic = context.cache.get("heuristic_first_top") if context else None
+        if first_heuristic in vhdl_candidates and first_heuristic not in non_periph_vhdl:
+            non_periph_vhdl.insert(0, first_heuristic)
         if primary_top in non_periph_vhdl:
             non_periph_vhdl = [primary_top] + [
                 c for c in non_periph_vhdl if c != primary_top
@@ -1168,6 +1268,7 @@ def generate_processor_config(
 
         # Add repository URL
         config["repository"] = url
+        normalize_generated_config(config, destination_path)
 
         # Save configuration
         print_green("[LOG] Salvando configuração\n")
@@ -1175,14 +1276,7 @@ def generate_processor_config(
             os.makedirs(config_path)
 
         # Build discovery block for Bluespec
-        discovery_block = {
-            "schema_version": "2.0",
-            "has_successful_candidate": True,
-            "candidate_count": 1,
-            "candidate_status": "success",
-            "max_candidates": run_context.max_candidates,
-        }
-        config["discovery"] = discovery_block
+        config["discovery"]["max_candidates"] = run_context.max_candidates
 
         # Save configuration (only if usable)
         print_green("[LOG] Salvando configuração\n")
@@ -1191,13 +1285,11 @@ def generate_processor_config(
 
         # Coordinator claim (b) fix: standalone config for the successful
         # Bluespec candidate before the main save.
-        save_successful_candidate_config(
-            str(config_path),
-            config,
-            repo_name,
-            top_module=config.get("top_module"),
-            roles=["first_heuristic"],
-        )
+        if config["discovery"]["has_successful_candidate"]:
+            save_successful_candidate_config(
+                str(config_path), config, repo_name,
+                top_module=config.get("top_module"), roles=["first_heuristic"],
+            )
 
         config_file = save_usable_config(config_path, config, repo_name)
         if config_file is not None and add_to_config and is_usable_config(config):
@@ -1205,7 +1297,7 @@ def generate_processor_config(
             save_config(central_config_path, config, repo_name)
 
         # Log for Bluespec
-        discovery_dir = os.path.join("discovery", repo_name, "logs")
+        discovery_dir = os.path.join(config_path, "discovery", repo_name, "logs")
         os.makedirs(discovery_dir, exist_ok=True)
         log_path = os.path.join(discovery_dir, "bluespec.log")
         try:
@@ -1221,7 +1313,7 @@ def generate_processor_config(
                 top_file="",
                 roles=["first_heuristic"],
                 heuristic_rank=1,
-                status="compilation_success",
+                status="compilation_success" if config["discovery"]["has_successful_candidate"] else "failure",
                 files=config.get("sim_files", []),
                 include_dirs=[],
                 extra_flags=config.get("extra_flags", []),
@@ -1235,10 +1327,11 @@ def generate_processor_config(
                 repo_name=repo_name,
                 repository_url=url,
                 candidates=[candidate_result],
-                successful_candidate=candidate_result,
+                successful_candidate=candidate_result if config["discovery"]["has_successful_candidate"] else None,
                 output_json=config,
+                repo_root=destination_path,
             )
-            save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+            save_discovery_report(report, os.path.join(config_path, "discovery", repo_name), repo_name)
         except Exception:
             pass
 
@@ -1261,6 +1354,8 @@ def generate_processor_config(
 
         # Add repository URL
         config["repository"] = url
+        normalize_generated_config(config, destination_path)
+        config["discovery"]["max_candidates"] = run_context.max_candidates
 
         # Save configuration
         print_green("[LOG] Salvando configuração\n")
@@ -1269,13 +1364,11 @@ def generate_processor_config(
 
         # Coordinator claim (b) fix: standalone config for the successful
         # Chisel candidate before the main save.
-        save_successful_candidate_config(
-            str(config_path),
-            config,
-            repo_name,
-            top_module=config.get("top_module"),
-            roles=["first_heuristic"],
-        )
+        if config["discovery"]["has_successful_candidate"]:
+            save_successful_candidate_config(
+                str(config_path), config, repo_name,
+                top_module=config.get("top_module"), roles=["first_heuristic"],
+            )
 
         config_file = save_usable_config(config_path, config, repo_name)
         if config_file is not None and add_to_config and is_usable_config(config):
@@ -1283,17 +1376,9 @@ def generate_processor_config(
             save_config(central_config_path, config, repo_name)
 
         # Discovery block for Chisel
-        discovery_block = {
-            "schema_version": "2.0",
-            "has_successful_candidate": True,
-            "candidate_count": 1,
-            "candidate_status": "success",
-            "max_candidates": run_context.max_candidates,
-        }
-        config["discovery"] = discovery_block
 
         # Log for Chisel
-        discovery_dir = os.path.join("discovery", repo_name, "logs")
+        discovery_dir = os.path.join(config_path, "discovery", repo_name, "logs")
         os.makedirs(discovery_dir, exist_ok=True)
         log_path = os.path.join(discovery_dir, "chisel.log")
         try:
@@ -1309,7 +1394,7 @@ def generate_processor_config(
                 top_file="",
                 roles=["first_heuristic"],
                 heuristic_rank=1,
-                status="compilation_success",
+                status="compilation_success" if config["discovery"]["has_successful_candidate"] else "failure",
                 files=config.get("sim_files", []),
                 include_dirs=[],
                 extra_flags=config.get("extra_flags", []),
@@ -1323,10 +1408,11 @@ def generate_processor_config(
                 repo_name=repo_name,
                 repository_url=url,
                 candidates=[candidate_result],
-                successful_candidate=candidate_result,
+                successful_candidate=candidate_result if config["discovery"]["has_successful_candidate"] else None,
                 output_json=config,
+                repo_root=destination_path,
             )
-            save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+            save_discovery_report(report, os.path.join(config_path, "discovery", repo_name), repo_name)
         except Exception:
             pass
 
@@ -1618,15 +1704,23 @@ def generate_processor_config(
     _validation_evidence: str | None = None
     _best: CandidateResult | None = None
     if run_context.candidates:
-        # Prefer the first successful candidate; fall back to the last tried.
+        # Prefer the first candidate that passed the tool and path checks.
         for _c in run_context.candidates:
             if _c.status == "compilation_success":
-                _best = _c
-                break
+                missing_inputs = missing_config_inputs(destination_path, _c.files, _c.include_dirs)
+                if missing_inputs:
+                    _c.status = "failure"
+                    _c.errors.extend(missing_inputs)
+                else:
+                    _best = _c
+                    break
         if _best is None:
             _best = run_context.candidates[-1]
         if _best.status == "compilation_success":
             _validation_passed = True
+            output_json["top_module"] = _best.top_module
+            output_json["sim_files"] = list(_best.files)
+            output_json["include_dirs"] = list(_best.include_dirs)
             _validation_level = "compilation_success"
             _validation_evidence = (
                 f"lint/compile succeeded for {_best.top_module}"
@@ -1639,6 +1733,7 @@ def generate_processor_config(
         "candidate_count": len(run_context.candidates),
         "candidate_status": "compilation_success" if _validation_passed else "failure",
         "max_candidates": run_context.max_candidates,
+        "defaults": {"march": "default", "two_memory": "default"},
         "validation_gate": {
             "passed": _validation_passed,
             "level": _validation_level or "none",
@@ -1657,9 +1752,12 @@ def generate_processor_config(
     # without a context or when the caller never passed one).
     if not run_context.candidates:
         role_labels = ["requested"] if run_context.top_module_override else ["first_heuristic"]
+        top_module = top_module or run_context.top_module_override or ""
+        output_json["top_module"] = top_module
         # In the fallback path the runner already succeeded/failed — use the
         # runner's is_simulable flag since no candidates exist to re-evaluate.
-        fallback_succeeded = is_simulable
+        missing_inputs = missing_config_inputs(destination_path, final_files, relative_include_dirs)
+        fallback_succeeded = bool(is_simulable and not missing_inputs)
         candidate_result = CandidateResult(
             top_module=top_module,
             top_file=str(run_context.top_file_override) if run_context.top_file_override else "",
@@ -1672,17 +1770,27 @@ def generate_processor_config(
             parameters={},
             compile_command="verilator --top-module " + top_module if top_module else "",
             exit_code=0 if fallback_succeeded else 1,
-            errors=[],
+            errors=missing_inputs,
             log_path=None,
         )
         run_context.candidates.append(candidate_result)
         # Re-evaluate _validation_passed now that a candidate exists
         if candidate_result.status == "compilation_success":
             _validation_passed = True
+            _best = candidate_result
             _validation_level = "compilation_success"
             _validation_evidence = (
                 f"lint/compile succeeded for {candidate_result.top_module}"
             )
+
+    discovery_block["has_successful_candidate"] = _validation_passed
+    discovery_block["candidate_count"] = len(run_context.candidates)
+    discovery_block["candidate_status"] = "compilation_success" if _validation_passed else "failure"
+    discovery_block["validation_gate"] = {
+        "passed": _validation_passed,
+        "level": _validation_level or "none",
+        "evidence": _validation_evidence or "no candidate passed validation",
+    }
 
     output_json["discovery"] = discovery_block
 
@@ -1729,7 +1837,7 @@ def generate_processor_config(
     # Other cores may be writing to the same central index concurrently.
 
     # Save runner output log to discovery/ tree
-    discovery_dir = os.path.join("discovery", repo_name, "logs")
+    discovery_dir = os.path.join(config_path, "discovery", repo_name, "logs")
     os.makedirs(discovery_dir, exist_ok=True)
     log_path = os.path.join(discovery_dir, "requesting.log")
     try:
@@ -1740,19 +1848,23 @@ def generate_processor_config(
         print_yellow(f"[WARN] Falha ao salvar o log: {e}")
 
     # Attach the main log path to the best (first successful) candidate.
-    if _best is not None:
+    if _best is not None and _best.log_path is None:
         _best.log_path = log_path
+    elif run_context.candidates and run_context.candidates[-1].log_path is None:
+        run_context.candidates[-1].log_path = log_path
 
     # Save full discovery report
     try:
+        export_candidates(config_path, repo_name, url, language_version_out, run_context.candidates)
         report = build_discovery_report(
             repo_name=repo_name,
             repository_url=url,
             candidates=run_context.candidates,
             successful_candidate=_best if _best and _best.status == "compilation_success" else None,
             output_json=output_json,
+            repo_root=destination_path,
         )
-        report_path = save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+        report_path = save_discovery_report(report, os.path.join(config_path, "discovery", repo_name), repo_name)
         print_green(f"[LOG] Discovery report saved to {report_path}")
     except Exception as e:
         print_yellow(f"[WARN] Could not save discovery report: {e}")

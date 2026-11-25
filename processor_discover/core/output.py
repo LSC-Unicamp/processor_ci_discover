@@ -1,6 +1,45 @@
 """Output helpers for generated processor discovery configs."""
 
+import shutil
+import subprocess
+from pathlib import Path
+
 from ..core.api import DiscoveryReport
+
+
+def collect_provenance(repo_root: str) -> dict:
+    """Record the source revision and available tool versions for the report."""
+    root = Path(repo_root)
+    provenance = {"repository_revision": None, "repository_dirty": None, "tool_versions": {}}
+    try:
+        git_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=root,
+            capture_output=True, text=True, timeout=5,
+        )
+        if git_root.returncode != 0 or Path(git_root.stdout.strip()).resolve() != root.resolve():
+            raise ValueError("The source directory is not a repository root")
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, timeout=5,
+        )
+        if revision.returncode == 0:
+            provenance["repository_revision"] = revision.stdout.strip()
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=root, capture_output=True, text=True, timeout=5,
+            )
+            provenance["repository_dirty"] = bool(dirty.stdout.strip()) if dirty.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    for tool in ("verilator", "ghdl"):
+        if not shutil.which(tool):
+            continue
+        try:
+            result = subprocess.run([tool, "--version"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                provenance["tool_versions"][tool] = (result.stdout or result.stderr).splitlines()[0]
+        except (OSError, subprocess.TimeoutExpired, IndexError):
+            pass
+    return provenance
 
 
 def create_output_json(
@@ -38,6 +77,7 @@ def build_discovery_report(
     candidates: list,
     successful_candidate=None,
     output_json: dict | None = None,
+    repo_root: str | None = None,
 ) -> DiscoveryReport:
     """Build a ``DiscoveryReport`` from the collected candidate results.
 
@@ -60,6 +100,7 @@ def build_discovery_report(
         candidates=candidates,
         successful_candidate=successful_candidate,
         output_json=output_json,
+        provenance=collect_provenance(repo_root) if repo_root else {},
     )
     return report
 

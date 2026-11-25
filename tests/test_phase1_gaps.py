@@ -231,7 +231,7 @@ class GapTests(unittest.TestCase):
             # Coordinator discrepancy fix: verify the missing override appears
             # in the discovery report with a failure status AND that a partial
             # config file was exported for it.
-            report_path = Path("discovery/demo/report.json")
+            report_path = config_dir / "discovery/demo/report.json"
             self.assertTrue(report_path.exists(), "Expected discovery report")
             report_data = json.loads(report_path.read_text())
 
@@ -294,9 +294,9 @@ class GapTests(unittest.TestCase):
             # The failure CandidateResult should have errors extracted.
             # Verify that a failure log file for the override was created
             # with error content.
-            log_dir = Path("discovery/demo/logs")
-            attempt_log = log_dir / "ForcedTop_attempt.log"
-            self.assertTrue(attempt_log.exists(), "Expected ForcedTop_attempt.log")
+            log_dir = config_dir / "discovery/demo/logs"
+            attempt_log = log_dir / "ForcedTop_attempt-1.log"
+            self.assertTrue(attempt_log.exists(), "Expected ForcedTop_attempt-1.log")
             content = attempt_log.read_text()
             self.assertIn("error", content.lower())
 
@@ -331,7 +331,7 @@ class GapTests(unittest.TestCase):
 
             # The status field lives in the discovery report, not the main
             # output config.  Read from discovery/demo/report.json.
-            report_path = Path("discovery/demo/report.json")
+            report_path = config_dir / "discovery/demo/report.json"
             self.assertTrue(report_path.exists(), "Expected discovery report")
             report_data = json.loads(report_path.read_text())
 
@@ -542,6 +542,10 @@ class GapTests(unittest.TestCase):
 
             # Both override and heuristic candidates are tried (Blocker 1).
             self.assertEqual(call_count[0], 2)
+            report = json.loads((config_dir / "discovery/demo/report.json").read_text())
+            self.assertEqual(len(report["candidates"]), 2)
+            for candidate in report["candidates"]:
+                self.assertTrue(Path(candidate["log_file"]).is_file())
 
     def test_cli_exit_status_on_success(self) -> None:
         """CLI should return 0 when config is produced."""

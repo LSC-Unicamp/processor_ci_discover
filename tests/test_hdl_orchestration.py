@@ -22,6 +22,7 @@ def temporary_cwd():
 
 
 def write_verilog_repo(repo_dir: Path) -> None:
+    (repo_dir / "include").mkdir()
     (repo_dir / "heuristic_core.sv").write_text(
         "module HeuristicCore; ALU alu(); endmodule\n",
         encoding="utf-8",

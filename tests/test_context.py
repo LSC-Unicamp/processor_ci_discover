@@ -111,10 +111,10 @@ class RunContextTests(unittest.TestCase):
             self.assertEqual(last_log, "ok")
             self.assertEqual(top_module, "forced")
             self.assertTrue(is_simulable)
-            call_kwargs = verilator_incremental.call_args.kwargs
-            self.assertEqual(call_kwargs["top_module"], "forced")
-            self.assertEqual(call_kwargs["max_iterations"], 2)
-            self.assertIs(call_kwargs["context"], context)
+            attempted_tops = [call.kwargs["top_module"] for call in verilator_incremental.call_args_list]
+            self.assertEqual(attempted_tops, ["forced", "heuristic"])
+            self.assertTrue(all(call.kwargs["max_iterations"] == 2 for call in verilator_incremental.call_args_list))
+            self.assertTrue(all(call.kwargs["context"] is context for call in verilator_incremental.call_args_list))
 
 
 if __name__ == "__main__":
