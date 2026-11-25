@@ -84,7 +84,7 @@ class RunContextTests(unittest.TestCase):
                 ),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["forced.sv"], {"inc"}),
+                    return_value=(0, "ok", ["forced.sv"], {"inc"}, "verilator --cc --top-module forced"),
                 ) as verilator_incremental,
             ):
                 final_files, final_includes, last_log, top_module, is_simulable = (

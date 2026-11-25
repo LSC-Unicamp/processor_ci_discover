@@ -82,7 +82,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
         def verilator_side_effect(**kwargs):
             attempts.append(kwargs["top_module"])
-            return 1, "cpu failed", [], set()
+            return 1, "cpu failed", [], set(), ""
 
         with (
             tempfile.TemporaryDirectory() as repo_tmp,
@@ -141,7 +141,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 ),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["forced_top.sv"], {"include"}),
+                    return_value=(0, "ok", ["forced_top.sv"], {"include"}, "verilator --cc --top-module forced_top"),
                 ) as verilator_incremental,
             ):
                 config = generate_processor_config(
@@ -152,8 +152,12 @@ class HdlOrchestrationTests(unittest.TestCase):
                     top_module_override="ForcedTop",
                 )
 
-        call_kwargs = verilator_incremental.call_args.kwargs
-        self.assertEqual(call_kwargs["top_module"], "ForcedTop")
+        call_args_list = [
+            c.kwargs for c in verilator_incremental.call_args_list
+        ]
+        self.assertEqual(len(call_args_list), 2)
+        self.assertEqual(call_args_list[0]["top_module"], "ForcedTop")
+        self.assertEqual(call_args_list[1]["top_module"], "HeuristicCore")
         self.assertEqual(config["top_module"], "ForcedTop")
         self.assertEqual(config["sim_files"], ["forced_top.sv"])
         self.assertEqual(config["include_dirs"], ["include"])
@@ -168,8 +172,8 @@ class HdlOrchestrationTests(unittest.TestCase):
         def verilator_side_effect(**kwargs):
             attempts.append(kwargs["top_module"])
             if kwargs["top_module"] == "ForcedTop":
-                return 1, "forced failed", [], set()
-            return 0, "heuristic ok", ["heuristic_core.sv"], set()
+                return 1, "forced failed", [], set(), ""
+            return 0, "heuristic ok", ["heuristic_core.sv"], set(), ""
 
         with (
             tempfile.TemporaryDirectory() as repo_tmp,
@@ -207,7 +211,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
         def verilator_side_effect(**kwargs):
             attempts.append(kwargs["top_module"])
-            return 0, "ok", ["heuristic_core.sv"], set()
+            return 0, "ok", ["heuristic_core.sv"], set(), ""
 
         with (
             tempfile.TemporaryDirectory() as repo_tmp,
@@ -262,7 +266,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 ),
                 patch(
                     "processor_discover.core.config_generator.ghdl_incremental",
-                    return_value=(True, "ghdl ok", ["forced_top.vhd"], "ForcedTop"),
+                    return_value=(True, "ghdl ok", ["forced_top.vhd"], "ForcedTop", "ghdl -a -e forced_top"),
                 ) as ghdl_incremental,
             ):
                 config = generate_processor_config(
@@ -297,7 +301,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 ),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["heuristic_core.sv"], set()),
+                    return_value=(0, "ok", ["heuristic_core.sv"], set(), ""),
                 ),
             ):
                 config = generate_processor_config(

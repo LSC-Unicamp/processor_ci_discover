@@ -12,6 +12,8 @@ Main functions:
 
 import os
 import json
+import re
+from copy import deepcopy
 
 
 def create_default_config(config_path: str, processor_name: str) -> None:
@@ -164,7 +166,8 @@ def save_usable_config(config_path: str, config_data: dict, processor_name: str)
 
 
 def save_failed_candidate_config(
-    config_path: str, config_data: dict, processor_name: str
+    config_path: str, config_data: dict, processor_name: str,
+    top_module: str | None = None, attempt_index: int = 0
 ) -> str | None:
     """Write a rejected config to ``discovery/<processor_name>/candidates/``.
 
@@ -179,6 +182,10 @@ def save_failed_candidate_config(
         The configuration dictionary.
     processor_name : str
         Name used for the output file (same as *repo_name*).
+    top_module : str or None
+        Top module name, included in the filename for uniqueness (Blocker 3).
+    attempt_index : int
+        1-based attempt index, included in the filename for uniqueness.
 
     Returns
     -------
@@ -199,15 +206,71 @@ def save_failed_candidate_config(
             # Already marked successful — don't save a duplicate failure copy
             return None
 
-        discovery_dir = os.path.join(config_path, "..", "discovery", processor_name, "candidates")
+        discovery_dir = os.path.join(config_path, "discovery", processor_name, "candidates")
         os.makedirs(discovery_dir, exist_ok=True)
-        file_path = os.path.join(discovery_dir, f"{processor_name}.json")
+        # Unique per-candidate filename: include top_module and attempt index (Blocker 3)
+        safe_module = re.sub(r"[^a-zA-Z0-9_]", "_", top_module or "unknown")
+        file_path = os.path.join(discovery_dir, f"{processor_name}_{safe_module}_attempt{attempt_index}.json")
         try:
-            save_config(discovery_dir, config_data, processor_name)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=2, default=str)
             return file_path
         except Exception:
             return None
     return None
+
+
+def save_successful_candidate_config(
+    config_path: str, config_data: dict, processor_name: str,
+    top_module: str | None = None, roles: list[str] | None = None
+) -> str | None:
+    """Write a successful-but-lint-only config to
+    ``discovery/<processor_name>/candidates/`` for evidence.
+
+    In Phase 1 the validation gate is lint-only (compilation success), so
+    ``is_simulable`` is ``False`` and the config does *not* go through
+    ``save_usable_config`` as a "usable" artifact.  Nevertheless the
+    candidate is valid — we preserve it as a standalone file with its
+    role so downstream consumers can inspect it.
+
+    Uses the same ``discovery/<repo>/`` relative path convention as the
+    discovery report so that the candidates directory is colocated and
+    easily discoverable.
+
+    Parameters
+    ----------
+    config_path : str
+        Base config directory.
+    config_data : dict
+        The configuration dictionary (Phase 2 schema 2.0).
+    processor_name : str
+        Repository name.
+    top_module : str or None
+        Top module name, included in the filename.
+    roles : list[str] or None
+        Roles of the candidate (``"requested"``, ``"first_heuristic"``, …).
+
+    Returns
+    -------
+    str or None
+        Full path to the written file, or ``None`` when it could not be saved.
+    """
+    discovery_dir = os.path.join(config_path, "discovery", processor_name, "candidates")
+    os.makedirs(discovery_dir, exist_ok=True)
+    safe_module = re.sub(r"[^a-zA-Z0-9_]", "_", top_module or "unknown")
+    file_path = os.path.join(discovery_dir, f"{processor_name}_{safe_module}_success.json")
+    try:
+        # Copy the config and add evidence metadata before writing.
+        evidence_data = deepcopy(config_data)
+        evidence_data.setdefault("discovery", {})["has_successful_candidate"] = True
+        evidence_data.setdefault("discovery", {})["candidate_status"] = "compilation_success"
+        evidence_data.setdefault("discovery", {})["roles"] = roles or []
+        evidence_data.setdefault("discovery", {})["top_module"] = top_module or ""
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(evidence_data, f, indent=2, default=str)
+        return file_path
+    except Exception:
+        return None
 
 
 __all__ = [
@@ -217,4 +280,5 @@ __all__ = [
     "is_usable_config",
     "save_usable_config",
     "save_failed_candidate_config",
+    "save_successful_candidate_config",
 ]

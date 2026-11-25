@@ -1507,7 +1507,7 @@ def compile_incremental(
     max_iterations: int = 20,
     timeout: int = 300,
     context: RunContext | None = None,
-) -> Tuple[int, str, List[str], Set[str]]:
+) -> Tuple[int, str, List[str], Set[str], List[str]]:
     """
     Incrementally build the file list by starting with the top module
     and adding dependencies as Verilator reports them.
@@ -1523,7 +1523,9 @@ def compile_incremental(
         timeout: Timeout for each Verilator run
 
     Returns:
-        (return_code, log, final_files, final_include_dirs)
+        (return_code, log, final_files, final_include_dirs, exact_command)
+        The exact_command is the final Verilator command line that was
+        executed (for recording in CandidateResult.compile_command).
     """
     if context is not None and context.cache.get("dependency_manifest"):
         max_iterations = context.maximize_attempts or max_iterations
@@ -1599,6 +1601,7 @@ def compile_incremental(
             extra_flags,
             module_graph,
         )
+        last_cmd = cmd
 
         print_blue(f"[INCREMENTAL] Files: {', '.join(current_files)}")
 
@@ -1645,7 +1648,7 @@ def compile_incremental(
             print_green(f"[INCREMENTAL] Final include dirs: {len(current_includes)}")
             # Order files topologically before returning (packages before importers)
             ordered_files = _order_sv_files(current_files, repo_root)
-            return 0, output, ordered_files, current_includes
+            return 0, output, ordered_files, current_includes, last_cmd
 
         # Parse errors to find missing dependencies
         missing_modules = _parse_missing_modules(output)
@@ -2078,4 +2081,4 @@ def compile_incremental(
     )
     # Order files topologically before returning (packages before importers)
     ordered_files = _order_sv_files(current_files, repo_root)
-    return rc, last_log, ordered_files, current_includes
+    return rc, last_log, ordered_files, current_includes, last_cmd

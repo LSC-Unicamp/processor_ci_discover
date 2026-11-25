@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from processor_discover.core.config_generator import generate_processor_config
+from processor_discover.core.config import is_usable_config
 
 
 def _cleanup_discovery() -> None:
@@ -37,6 +38,15 @@ def _write_verilog_repo(repo_dir: Path) -> None:
 
 
 class GapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._test_cwd = tempfile.TemporaryDirectory()
+        self._previous_cwd = os.getcwd()
+        os.chdir(self._test_cwd.name)
+
+    def tearDown(self) -> None:
+        os.chdir(self._previous_cwd)
+        self._test_cwd.cleanup()
+
     # ------------------------------------------------------------------
     # Gap 1 – Candidate export: save_failed_candidate_config is called
     #         for each failed attempt (max 3 distinct role-selected).
@@ -58,8 +68,8 @@ class GapTests(unittest.TestCase):
             def verilator_side_effect(**kwargs):
                 attempts.append(kwargs["top_module"])
                 if kwargs["top_module"] == "ForcedTop":
-                    return 1, "forced failed", [], set()
-                return 0, "heuristic ok", ["core.sv"], set()
+                    return 1, "forced failed", [], set(), ""
+                return 0, "heuristic ok", ["core.sv"], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -97,7 +107,7 @@ class GapTests(unittest.TestCase):
                 )
 
             def side_effect(**kwargs):
-                return 1, "always fail", [], set()
+                return 1, "always fail", [], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -132,8 +142,8 @@ class GapTests(unittest.TestCase):
             def side_effect(**kwargs):
                 attempts.append(kwargs["top_module"])
                 if kwargs["top_module"] == "ForcedTop":
-                    return 1, "forced failed", [], set()
-                return 0, "heuristic ok", ["core.sv"], set()
+                    return 1, "forced failed", [], set(), ""
+                return 0, "heuristic ok", ["core.sv"], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -167,7 +177,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["core.sv"], set()),
+                    return_value=(0, "ok", ["core.sv"], set(), ""),
                 ) as mock_verilator,
             ):
                 generate_processor_config(
@@ -201,7 +211,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["core.sv"], set()),
+                    return_value=(0, "ok", ["core.sv"], set(), ""),
                 ),
             ):
                 config = generate_processor_config(
@@ -217,6 +227,35 @@ class GapTests(unittest.TestCase):
             # fallback should still be tried.  sim_files contains filenames,
             # not module names.
             self.assertIn("core.sv", config.get("sim_files", [""]))
+
+            # Coordinator discrepancy fix: verify the missing override appears
+            # in the discovery report with a failure status AND that a partial
+            # config file was exported for it.
+            report_path = Path("discovery/demo/report.json")
+            self.assertTrue(report_path.exists(), "Expected discovery report")
+            report_data = json.loads(report_path.read_text())
+
+            candidate_modules = [c["top_module"] for c in report_data.get("candidates", [])]
+            self.assertIn("NonExistentTop", candidate_modules,
+                          "Missing requested top must appear in report.candidates")
+
+            missing_candidate = next(
+                (c for c in report_data["candidates"] if c["top_module"] == "NonExistentTop"),
+                None,
+            )
+            self.assertIsNotNone(missing_candidate,
+                                 "NonExistentTop candidate entry must exist")
+            self.assertIn("requested", missing_candidate["roles"],
+                          "Missing override must have 'requested' role")
+
+            # Verify the failed / partial config file was exported.
+            candidates_dir = config_dir / "discovery/demo/candidates"
+            missing_configs = [
+                f for f in candidates_dir.iterdir()
+                if f.name.startswith("demo_NonExistentTop_") and f.name.endswith(".json")
+            ]
+            self.assertTrue(len(missing_configs) >= 1,
+                            "Partial config for missing requested top must be exported")
 
     # ------------------------------------------------------------------
     # Gap 4 – Failure diagnostics: errors and log_path populated.
@@ -234,8 +273,8 @@ class GapTests(unittest.TestCase):
             def side_effect(**kwargs):
                 top = kwargs["top_module"]
                 if top == "ForcedTop":
-                    return 1, "error: undefined symbol `foo`", [], set()
-                return 0, "ok", ["core.sv"], set()
+                    return 1, "error: undefined symbol `foo`", [], set(), ""
+                return 0, "ok", ["core.sv"], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -279,7 +318,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["forced_top.sv"], set()),
+                    return_value=(0, "ok", ["forced_top.sv"], set(), ""),
                 ),
             ):
                 generate_processor_config(
@@ -313,7 +352,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["core.sv"], set()),
+                    return_value=(0, "ok", ["core.sv"], set(), ""),
                 ),
             ):
                 generate_processor_config(
@@ -363,8 +402,8 @@ class GapTests(unittest.TestCase):
                 # actually iterates through the full limited set.  Succeed on
                 # the max_candidates-th attempt.
                 if attempt_count == 2:
-                    return 0, "ok", [f"cpu_{kwargs['top_module']}.sv"], set()
-                return 1, "fail", [], set()
+                    return 0, "ok", [f"cpu_{kwargs['top_module']}.sv"], set(), ""
+                return 1, "fail", [], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -407,8 +446,8 @@ class GapTests(unittest.TestCase):
                 attempts.append(kwargs["top_module"])
                 # Fail the first 2 attempts; succeed on the 3rd (default limit).
                 if attempt_count == 3:
-                    return 0, "ok", [f"cpu_{kwargs['top_module']}.sv"], set()
-                return 1, "fail", [], set()
+                    return 0, "ok", [f"cpu_{kwargs['top_module']}.sv"], set(), ""
+                return 1, "fail", [], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -451,7 +490,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(1, "always fail", [], set()),
+                    return_value=(1, "always fail", [], set(), ""),
                 ),
             ):
                 generate_processor_config(
@@ -484,7 +523,7 @@ class GapTests(unittest.TestCase):
 
             def side_effect(**kwargs):
                 call_count[0] += 1
-                return 0, "ok", ["forced_top.sv"], set()
+                return 0, "ok", ["forced_top.sv"], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -501,9 +540,8 @@ class GapTests(unittest.TestCase):
                     max_candidates=3,
                 )
 
-            # Verilator should only be called once (override succeeded,
-            # no fallback needed).
-            self.assertEqual(call_count[0], 1)
+            # Both override and heuristic candidates are tried (Blocker 1).
+            self.assertEqual(call_count[0], 2)
 
     def test_cli_exit_status_on_success(self) -> None:
         """CLI should return 0 when config is produced."""
@@ -515,7 +553,7 @@ class GapTests(unittest.TestCase):
             _write_verilog_repo(repo_dir)
 
             def side_effect(**kwargs):
-                return 0, "ok", ["core.sv"], set()
+                return 0, "ok", ["core.sv"], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -542,7 +580,7 @@ class GapTests(unittest.TestCase):
             _write_verilog_repo(repo_dir)
 
             def side_effect(**kwargs):
-                return 1, "fail", [], set()
+                return 1, "fail", [], set(), ""
 
             with (
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
@@ -574,7 +612,7 @@ class GapTests(unittest.TestCase):
                 patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["core.sv"], set()),
+                    return_value=(0, "ok", ["core.sv"], set(), ""),
                 ),
             ):
                 generate_processor_config(
@@ -588,6 +626,123 @@ class GapTests(unittest.TestCase):
             config_data = json.loads((config_dir / "demo.json").read_text())
             self.assertEqual(config_data["march"], "rv32i")
             self.assertEqual(config_data["two_memory"], False)
+
+
+# ------------------------------------------------------------------
+# Coordinator claim (b): end-to-end test – successful candidate produces
+# standalone config file and canonical output remains valid.
+# ------------------------------------------------------------------
+    def test_b1_overridesuccess_produces_standalone_config(self) -> None:
+        """A successful override candidate should produce a standalone config
+        file in discovery/<repo>/candidates/ with its role preserved, and the
+        canonical config should also be valid."""
+        _cleanup_discovery()
+        with tempfile.TemporaryDirectory() as repo_tmp, \
+             tempfile.TemporaryDirectory() as config_tmp:
+            repo_dir = Path(repo_tmp)
+            config_dir = Path(config_tmp)
+            _write_verilog_repo(repo_dir)
+
+            with (
+                patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
+                patch(
+                    "processor_discover.core.config_generator.verilator_incremental",
+                    return_value=(0, "ok", ["forced_top.sv"], set(), ""),
+                ),
+            ):
+                generate_processor_config(
+                    "https://example.invalid/demo.git",
+                    str(config_dir),
+                    local_repo=str(repo_dir),
+                    top_module_override="ForcedTop",
+                    max_candidates=3,
+                )
+
+            # 1. Standalone candidate config exists in candidates/ with role.
+            candidates_dir = config_dir / "discovery/demo/candidates"
+            self.assertTrue(candidates_dir.exists(), "candidates/ dir should exist")
+            success_files = [
+                f for f in candidates_dir.iterdir()
+                if f.name.startswith("demo_ForcedTop_") and f.name.endswith(".json")
+            ]
+            self.assertGreater(len(success_files), 0,
+                "Successful override must produce a standalone config in candidates/")
+
+            standalone_path = success_files[0]
+            standalone_data = json.loads(standalone_path.read_text())
+            self.assertIn("ForcedTop", standalone_data.get("top_module", ""),
+                "Standalone config must reference the override top module")
+
+            # 2. Canonical config exists and is valid.
+            canonical = config_dir / "demo.json"
+            self.assertTrue(canonical.exists(),
+                "Canonical config.json should exist when successful")
+            canonical_data = json.loads(canonical.read_text())
+            self.assertEqual(canonical_data.get("top_module"), "ForcedTop",
+                "Canonical config top_module must match the successful override")
+            self.assertTrue(
+                is_usable_config(canonical_data),
+                "Canonical config must pass is_usable_config",
+            )
+
+    def test_b2_heuristic_success_produces_standalone_config(self) -> None:
+        """A successful first-heuristic candidate should produce a standalone
+        config file, and the canonical output must remain valid."""
+        _cleanup_discovery()
+        with tempfile.TemporaryDirectory() as repo_tmp, \
+             tempfile.TemporaryDirectory() as config_tmp:
+            repo_dir = Path(repo_tmp)
+            config_dir = Path(config_tmp)
+            _write_verilog_repo(repo_dir)
+
+            def side_effect(**kwargs):
+                top = kwargs["top_module"]
+                # Override fails, heuristic succeeds
+                if top == "ForcedTop":
+                    return 1, "error: unknown module", [], set(), ""
+                return 0, "ok", ["core.sv"], set(), ""
+
+            with (
+                patch("processor_discover.core.config_generator._handle_dependency_manager", return_value=False),
+                patch(
+                    "processor_discover.core.config_generator.verilator_incremental",
+                    side_effect=side_effect,
+                ),
+            ):
+                generate_processor_config(
+                    "https://example.invalid/demo.git",
+                    str(config_dir),
+                    local_repo=str(repo_dir),
+                    top_module_override="ForcedTop",
+                    max_candidates=3,
+                )
+
+            # 1. Standalone file for the successful heuristic candidate exists.
+            candidates_dir = config_dir / "discovery/demo/candidates"
+            self.assertTrue(candidates_dir.exists(), "candidates/ dir should exist")
+            heuristic_files = [
+                f for f in candidates_dir.iterdir()
+                if "CpuCore" in f.name and f.name.endswith(".json")
+            ]
+            self.assertGreater(len(heuristic_files), 0,
+                "Successful heuristic candidate must produce a standalone config")
+
+            heuristic_path = heuristic_files[0]
+            heuristic_data = json.loads(heuristic_path.read_text())
+            self.assertIn("CpuCore", heuristic_data.get("top_module", ""),
+                "Standalone heuristic config must reference the heuristic top module")
+
+            # 2. Canonical config is valid.
+            canonical = config_dir / "demo.json"
+            self.assertTrue(canonical.exists(),
+                "Canonical config must exist after heuristic success")
+            canonical_data = json.loads(canonical.read_text())
+            self.assertEqual(canonical_data.get("top_module"), "CpuCore",
+                "Canonical config top_module must match the successful heuristic")
+            self.assertTrue(
+                is_usable_config(canonical_data),
+                "Canonical config must pass is_usable_config",
+            )
 
 
 if __name__ == "__main__":

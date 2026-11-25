@@ -57,6 +57,7 @@ from typing import List
 from .config import (
     save_config,
     save_failed_candidate_config,
+    save_successful_candidate_config,
     save_usable_config,
     is_usable_config,
 )
@@ -226,6 +227,7 @@ def try_incremental_approach(
     timeout: int = 300,
     top_module_override: str | None = None,
     context: RunContext | None = None,
+    config_path: str = "",
 ) -> tuple:
     """
     Try the incremental bottom-up approach for Verilog/SystemVerilog files.
@@ -354,6 +356,14 @@ def try_incremental_approach(
     has_override = (
         context is not None and context.top_module_override is not None
     )
+
+    # Track the first successful candidate so we can still try remaining
+    # heuristic candidates before returning (Blocker 1).
+    first_success: tuple | None = None
+    _first_success_roles: list[str] | None = None
+    # Track independent heuristic rank for non-override candidates (Blocker 2).
+    heuristic_rank = 0
+
     for idx, top_module in enumerate(top_candidates, 1):
         print_green(
             f"[INCREMENTAL] === Candidate {idx}/{len(top_candidates)}: {top_module} ==="
@@ -361,6 +371,7 @@ def try_incremental_approach(
         if top_module not in module_to_file:
             print_yellow(f"[INCREMENTAL] Skipping {top_module} - no file mapping found")
             # If this was an explicitly requested top, record the failure
+            # and save a failed config so it is exported (Blocker 3 residual).
             if has_override and top_module == context.top_module_override and context is not None:
                 context.candidates.append(
                     CandidateResult(
@@ -378,6 +389,31 @@ def try_incremental_approach(
                         errors=[f"Module '{top_module}' not found in module list"],
                         log_path=None,
                     )
+                )
+                if context.config_path is None:
+                    continue
+                output_cfg = create_output_json(
+                    repo_name=repo_name,
+                    url=context.repository_url or "",
+                    filtered_files=[],
+                    include_dirs=set(),
+                    top_module=top_module,
+                    language_version=language_version,
+                    is_simulable=False,
+                )
+                output_cfg["discovery"] = {
+                    "schema_version": "2.0",
+                    "has_successful_candidate": False,
+                    "candidate_status": "failure",
+                    "candidate_count": len(context.candidates),
+                    "max_candidates": context.max_candidates,
+                }
+                save_failed_candidate_config(
+                    str(context.config_path),
+                    output_cfg,
+                    repo_name,
+                    top_module=top_module,
+                    attempt_index=idx,
                 )
             continue
 
@@ -419,12 +455,15 @@ def try_incremental_approach(
 
         # Check if this candidate was already recorded (e.g. by a prior
         # pass through try_incremental_approach or ghdl_incremental).
-        _already_seen = any(
-            c.top_module == dedup_key[0] and c.top_file == dedup_key[1]
-            for c in (context.candidates if context else [])
-        )
+        # If found, merge the new role into the existing entry (Blocker 2).
+        _existing_idx: int | None = None
+        if context is not None:
+            for _i, _c in enumerate(context.candidates):
+                if _c.top_module == dedup_key[0] and _c.top_file == dedup_key[1]:
+                    _existing_idx = _i
+                    break
 
-        rc, log, final_files, final_includes = verilator_incremental(
+        rc, log, final_files, final_includes, _verilator_last_cmd = verilator_incremental(
             repo_root=repo_root,
             top_module=top_module,
             top_module_file=top_module_file,
@@ -443,39 +482,46 @@ def try_incremental_approach(
             context=context,
         )
 
-        # Determine the role / provenance for this candidate
+        # Determine the role / provenance for this candidate.
+        # Blocker 2 fix: the override candidate is separate from heuristics.
+        # Non-override candidates track their own independent rank.
         if has_override and top_module == context.top_module_override:
             role = "requested"
-            heuristic_rank = idx
-        elif has_override:
-            role = "fallback"
-            heuristic_rank = idx
+            heuristic_rank = 0  # override candidates don't have a heuristic rank
         else:
-            role = "first_heuristic" if idx == 1 else "fallback"
-            heuristic_rank = idx
+            heuristic_rank += 1
+            role = "first_heuristic" if heuristic_rank == 1 else "fallback"
 
         if rc == 0:
             print_green(f"[INCREMENTAL] ✓ Success with top module: {top_module}")
-            # Record the successful candidate (only if not already recorded)
-            if not _already_seen and context is not None:
-                context.candidates.append(
-                    CandidateResult(
-                        top_module=top_module,
-                        top_file=top_module_file,
-                        roles=[role],
-                        heuristic_rank=heuristic_rank,
-                        status="compilation_success",
-                        files=list(final_files),
-                        include_dirs=list(final_includes),
-                        extra_flags=list(verilator_extra_flags or []),
-                        parameters={},
-                        compile_command="verilator --top-module " + top_module,
-                        exit_code=0,
-                        errors=[],
-                        log_path=None,
+            # Record the successful candidate. If already seen, merge the role
+            # instead of duplicating (Blocker 2).
+            if _existing_idx is not None and context is not None:
+                context.candidates[_existing_idx].roles.append(role)
+            else:
+                if context is not None:
+                    context.candidates.append(
+                        CandidateResult(
+                            top_module=top_module,
+                            top_file=top_module_file,
+                            roles=[role],
+                            heuristic_rank=heuristic_rank,
+                            status="compilation_success",
+                            files=list(final_files),
+                            include_dirs=list(final_includes),
+                            extra_flags=list(verilator_extra_flags or []),
+                            parameters={},
+                            compile_command=_verilator_last_cmd,
+                            exit_code=0,
+                            errors=[],
+                            log_path=None,
+                        )
                     )
-                )
-            return final_files, final_includes, log, top_module, True
+            # Record the first successful candidate and continue trying
+            # remaining heuristic candidates before returning (Blocker 1).
+            if first_success is None:
+                first_success = (final_files, final_includes, log, top_module, True)
+                _first_success_roles = [role]
         else:
             # Capture diagnostics from the runner log for the failure report.
             error_lines = []
@@ -492,7 +538,7 @@ def try_incremental_approach(
                 error_lines = log.splitlines()[-5:]
 
             failure_log_path = None
-            if context is not None and error_lines:
+            if context is not None:
                 discovery_dir = os.path.join("discovery", repo_name, "logs")
                 os.makedirs(discovery_dir, exist_ok=True)
                 safe_top = re.sub(r"[^a-zA-Z0-9_]", "_", top_module or "unknown")
@@ -505,28 +551,32 @@ def try_incremental_approach(
                 except Exception:
                     failure_log_path = None
 
-            # Record failure candidate (only if not already recorded)
-            if not _already_seen and context is not None:
-                context.candidates.append(
-                    CandidateResult(
-                        top_module=top_module,
-                        top_file=top_module_file,
-                        roles=[role],
-                        heuristic_rank=heuristic_rank,
-                        status="failure",
-                        files=list(final_files),
-                        include_dirs=list(final_includes),
-                        extra_flags=list(verilator_extra_flags or []),
-                        parameters={},
-                        compile_command="verilator --top-module " + top_module,
-                        exit_code=rc,
-                        errors=error_lines,
-                        log_path=failure_log_path,
+            # Record failure candidate. If already seen, merge the role
+            # instead of duplicating (Blocker 2).
+            if _existing_idx is not None and context is not None:
+                context.candidates[_existing_idx].roles.append(role)
+            else:
+                if context is not None:
+                    context.candidates.append(
+                        CandidateResult(
+                            top_module=top_module,
+                            top_file=top_module_file,
+                            roles=[role],
+                            heuristic_rank=heuristic_rank,
+                            status="failure",
+                            files=list(final_files),
+                            include_dirs=list(final_includes),
+                            extra_flags=list(verilator_extra_flags or []),
+                            parameters={},
+                            compile_command=_verilator_last_cmd,
+                            exit_code=rc,
+                            errors=error_lines,
+                            log_path=failure_log_path,
+                        )
                     )
-                )
 
             # Save the failed config to candidates/ directory
-            if not _already_seen and context is not None:
+            if _existing_idx is None and context is not None and context.config_path is not None:
                 output_cfg = create_output_json(
                     repo_name=repo_name,
                     url=context.repository_url or "",
@@ -544,9 +594,11 @@ def try_incremental_approach(
                     "max_candidates": context.max_candidates,
                 }
                 save_failed_candidate_config(
-                    str(context.config_path or config_path),
+                    str(context.config_path),
                     output_cfg,
                     repo_name,
+                    top_module=top_module,
+                    attempt_index=idx,
                 )
 
             if (
@@ -559,7 +611,29 @@ def try_incremental_approach(
                 )
             print_yellow(f"[INCREMENTAL] ✗ Failed with top module: {top_module}")
 
-    # If all failed, return empty result
+    # Return the first successful candidate (if any), otherwise the failure result
+    if first_success is not None:
+        files, includes, _log, top_module, _success = first_success
+        # Coordinator claim (b) fix: save standalone config for successful
+        # candidates so downstream consumers can inspect role-selected artifacts.
+        if context is not None and context.config_path is not None and _first_success_roles is not None:
+            output_cfg = create_output_json(
+                repo_name=repo_name,
+                url=context.repository_url or "",
+                filtered_files=list(files),
+                include_dirs=includes,
+                top_module=top_module,
+                language_version=language_version,
+                is_simulable=False,
+            )
+            save_successful_candidate_config(
+                str(context.config_path),
+                output_cfg,
+                repo_name,
+                top_module=top_module,
+                roles=_first_success_roles,
+            )
+        return first_success
     return [], set(), "", "", False
 
 
@@ -657,15 +731,18 @@ def interactive_simulate_and_minimize(
             print_yellow(
                 f"[TOP] Using user-specified top module override: {top_module_override}"
             )
-            primary_top = top_module_override
-            # Ensure the override is tried first, keep heuristics as fallback
-            candidates = [top_module_override] + [
-                c for c in candidates if c != top_module_override
-            ]
         else:
             print_yellow(
-                f"[TOP] Warning: top module override '{top_module_override}' not found in extracted modules; falling back to heuristics"
+                f"[TOP] Warning: top module override '{top_module_override}' not found in extracted modules; will still attempt to record failure"
             )
+        primary_top = top_module_override
+        # Always prepend the override so it is tried first and failures are
+        # recorded (fix for coordinator discrepancy: unreachable branch).
+        # If the override is not in module_to_file the loop will skip it and
+        # save a failed config; if it exists it compiles like any other candidate.
+        candidates = [top_module_override] + [
+            c for c in candidates if c != top_module_override
+        ]
     if (
         primary_top
         and not top_module_override
@@ -813,7 +890,7 @@ def interactive_simulate_and_minimize(
         )
 
         print_green(f"[CORE] Trying incremental bottom-up GHDL approach first...")
-        is_simulable, last_log, final_files, top_module = ghdl_incremental(
+        is_simulable, last_log, final_files, top_module, _ghdl_last_cmd = ghdl_incremental(
             repo_root=repo_root,
             repo_name=repo_name,
             top_candidates=vhdl_candidates,
@@ -906,7 +983,7 @@ def interactive_simulate_and_minimize(
         )
 
         print_green(f"[CORE] Trying fallback incremental GHDL approach...")
-        is_simulable, last_log, final_files, top_module = ghdl_incremental(
+        is_simulable, last_log, final_files, top_module, _ghdl_last_cmd = ghdl_incremental(
             repo_root=repo_root,
             repo_name=repo_name,
             top_candidates=vhdl_candidates,
@@ -1112,6 +1189,16 @@ def generate_processor_config(
         if not os.path.exists(config_path):
             os.makedirs(config_path)
 
+        # Coordinator claim (b) fix: standalone config for the successful
+        # Bluespec candidate before the main save.
+        save_successful_candidate_config(
+            str(config_path),
+            config,
+            repo_name,
+            top_module=config.get("top_module"),
+            roles=["first_heuristic"],
+        )
+
         config_file = save_usable_config(config_path, config, repo_name)
         if config_file is not None and add_to_config and is_usable_config(config):
             central_config_path = os.path.join(config_path, "config.json")
@@ -1179,6 +1266,16 @@ def generate_processor_config(
         print_green("[LOG] Salvando configuração\n")
         if not os.path.exists(config_path):
             os.makedirs(config_path)
+
+        # Coordinator claim (b) fix: standalone config for the successful
+        # Chisel candidate before the main save.
+        save_successful_candidate_config(
+            str(config_path),
+            config,
+            repo_name,
+            top_module=config.get("top_module"),
+            roles=["first_heuristic"],
+        )
 
         config_file = save_usable_config(config_path, config, repo_name)
         if config_file is not None and add_to_config and is_usable_config(config):
@@ -1511,6 +1608,43 @@ def generate_processor_config(
         language_version_out,
         is_simulable,
     )
+
+    # Blocker 6: is_simulable reflects actual simulation, not just compilation.
+    # The validation gate uses the validation level and evidence from candidates.
+    # Blocker 1 residual: pick the FIRST successful candidate, not the last tried
+    # (candidates[-1] would be wrong when early pass / later fail).
+    _validation_passed = False
+    _validation_level: str | None = None
+    _validation_evidence: str | None = None
+    _best: CandidateResult | None = None
+    if run_context.candidates:
+        # Prefer the first successful candidate; fall back to the last tried.
+        for _c in run_context.candidates:
+            if _c.status == "compilation_success":
+                _best = _c
+                break
+        if _best is None:
+            _best = run_context.candidates[-1]
+        if _best.status == "compilation_success":
+            _validation_passed = True
+            _validation_level = "compilation_success"
+            _validation_evidence = (
+                f"lint/compile succeeded for {_best.top_module}"
+                + (f" ({len(_best.errors)} error lines in log)" if _best.log_path else "")
+            )
+
+    discovery_block = {
+        "schema_version": "2.0",
+        "has_successful_candidate": _validation_passed,
+        "candidate_count": len(run_context.candidates),
+        "candidate_status": "compilation_success" if _validation_passed else "failure",
+        "max_candidates": run_context.max_candidates,
+        "validation_gate": {
+            "passed": _validation_passed,
+            "level": _validation_level or "none",
+            "evidence": _validation_evidence or "no candidates tried",
+        },
+    }
     if run_context.cache.get("bender_defines"):
         output_json["extra_flags"] = run_context.cache["bender_defines"]
         output_json["pre_script"] = "bender checkout"
@@ -1523,31 +1657,38 @@ def generate_processor_config(
     # without a context or when the caller never passed one).
     if not run_context.candidates:
         role_labels = ["requested"] if run_context.top_module_override else ["first_heuristic"]
+        # In the fallback path the runner already succeeded/failed — use the
+        # runner's is_simulable flag since no candidates exist to re-evaluate.
+        fallback_succeeded = is_simulable
         candidate_result = CandidateResult(
             top_module=top_module,
             top_file=str(run_context.top_file_override) if run_context.top_file_override else "",
             roles=role_labels,
             heuristic_rank=1,
-            status="compilation_success" if is_simulable else "failure",
+            status="compilation_success" if fallback_succeeded else "failure",
             files=list(final_files),
             include_dirs=list(relative_include_dirs),
             extra_flags=list(output_json.get("extra_flags", [])),
             parameters={},
             compile_command="verilator --top-module " + top_module if top_module else "",
-            exit_code=0 if is_simulable else 1,
+            exit_code=0 if fallback_succeeded else 1,
             errors=[],
             log_path=None,
         )
         run_context.candidates.append(candidate_result)
+        # Re-evaluate _validation_passed now that a candidate exists
+        if candidate_result.status == "compilation_success":
+            _validation_passed = True
+            _validation_level = "compilation_success"
+            _validation_evidence = (
+                f"lint/compile succeeded for {candidate_result.top_module}"
+            )
 
-    discovery_block = {
-        "schema_version": "2.0",
-        "has_successful_candidate": is_simulable,
-        "candidate_count": len(run_context.candidates),
-        "candidate_status": "success" if is_simulable else "failure",
-        "max_candidates": run_context.max_candidates,
-    }
     output_json["discovery"] = discovery_block
+
+    # Blocker 6 residual: the top-level is_simulable must reflect the
+    # validation gate (_validation_passed), not the runner's lint-only flag.
+    output_json["is_simulable"] = _validation_passed
 
     # Save configuration (only if usable)
     # When no candidate succeeded, the discovery block marks the config
@@ -1558,6 +1699,18 @@ def generate_processor_config(
         os.makedirs(config_path)
 
     config_file = save_usable_config(config_path, output_json, repo_name)
+
+    # Coordinator claim (b) fix: save standalone config for successful
+    # candidates in the main flow so downstream consumers can inspect
+    # role-selected artifacts.
+    if _best is not None and _best.status == "compilation_success":
+        save_successful_candidate_config(
+            str(config_path),
+            output_json,
+            repo_name,
+            top_module=_best.top_module,
+            roles=_best.roles,
+        )
     if config_file is None:
         print_yellow("[WARN] Config rejected (not usable); skipping main output")
         # Remove stale output from a prior successful run
@@ -1572,15 +1725,8 @@ def generate_processor_config(
     if add_to_config and is_usable_config(output_json):
         central_config_path = os.path.join(config_path, "config.json")
         save_config(central_config_path, output_json, repo_name)
-    elif add_to_config:
-        # Also remove stale central config when this run fails
-        central_config_path = os.path.join(config_path, "config.json")
-        if os.path.exists(central_config_path):
-            try:
-                os.remove(central_config_path)
-                print_green("[LOG] Removed stale central config.json")
-            except Exception:
-                pass
+    # Blocker 7: Do NOT delete the shared central config.json when one core fails.
+    # Other cores may be writing to the same central index concurrently.
 
     # Save runner output log to discovery/ tree
     discovery_dir = os.path.join("discovery", repo_name, "logs")
@@ -1593,9 +1739,9 @@ def generate_processor_config(
     except Exception as e:
         print_yellow(f"[WARN] Falha ao salvar o log: {e}")
 
-    # Attach the main log path to the last recorded candidate.
-    if run_context.candidates:
-        run_context.candidates[-1].log_path = log_path
+    # Attach the main log path to the best (first successful) candidate.
+    if _best is not None:
+        _best.log_path = log_path
 
     # Save full discovery report
     try:
@@ -1603,7 +1749,7 @@ def generate_processor_config(
             repo_name=repo_name,
             repository_url=url,
             candidates=run_context.candidates,
-            successful_candidate=run_context.candidates[-1] if run_context.candidates and is_simulable else None,
+            successful_candidate=_best if _best and _best.status == "compilation_success" else None,
             output_json=output_json,
         )
         report_path = save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
