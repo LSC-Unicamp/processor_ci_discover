@@ -18,14 +18,12 @@ class RunContextTests(unittest.TestCase):
             repository_url="https://example.invalid/repo.git",
             config_path="config/out",
             local_repo="/tmp/example",
-            model="test-model",
             plot_graph=True,
             add_to_config=True,
             language_version="1800-2023",
             include_dirs=["inc", Path("rtl/include")],
             module_files=["rtl/top.sv"],
             top_module_override="top",
-            no_llama=True,
             maximize_attempts=4,
         )
 
@@ -36,14 +34,12 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(as_dict["repository_url"], "https://example.invalid/repo.git")
         self.assertEqual(as_dict["config_path"], "config/out")
         self.assertEqual(as_dict["local_repo"], "/tmp/example")
-        self.assertEqual(as_dict["model"], "test-model")
         self.assertTrue(as_dict["plot_graph"])
         self.assertTrue(as_dict["add_to_config"])
         self.assertEqual(as_dict["language_version"], "1800-2023")
         self.assertEqual(as_dict["include_dirs"], ["inc", "rtl/include"])
         self.assertEqual(as_dict["module_files"], ["rtl/top.sv"])
         self.assertEqual(as_dict["top_module_override"], "top")
-        self.assertTrue(as_dict["no_llama"])
         self.assertEqual(as_dict["maximize_attempts"], 4)
 
     def test_build_run_context_populates_runtime_options(self) -> None:
@@ -53,7 +49,6 @@ class RunContextTests(unittest.TestCase):
             repository_url="https://example.invalid/repo.git",
             config_path="config",
             local_repo="/tmp/local",
-            model="small-model",
             plot_graph=True,
             add_to_config=True,
             include_dirs=["inc"],
@@ -63,7 +58,6 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(context.repo_root, Path("/tmp/example"))
         self.assertEqual(context.config_path, Path("config"))
         self.assertEqual(context.local_repo, Path("/tmp/local"))
-        self.assertEqual(context.model, "small-model")
         self.assertTrue(context.plot_graph)
         self.assertTrue(context.add_to_config)
         self.assertEqual(context.include_dirs, [Path("inc")])
@@ -90,7 +84,7 @@ class RunContextTests(unittest.TestCase):
                 ),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
-                    return_value=(0, "ok", ["forced.sv"], {"inc"}),
+                    return_value=(0, "ok", ["forced.sv"], {"inc"}, "verilator --cc --top-module forced"),
                 ) as verilator_incremental,
             ):
                 final_files, final_includes, last_log, top_module, is_simulable = (

@@ -17,15 +17,14 @@ def build_run_context(
     *,
     config_path: Path | str | None = None,
     local_repo: Path | str | None = None,
-    model: str = "qwen2.5:32b",
     plot_graph: bool = False,
     add_to_config: bool = False,
-    no_llama: bool = False,
     top_module_override: str | None = None,
     top_file_override: Path | str | None = None,
     dependency_target: str | None = None,
     language_version: str | None = None,
     maximize_attempts: int = 6,
+    max_candidates: int = 3,
     include_dirs: Optional[Iterable[Path | str]] = None,
     module_files: Optional[Iterable[Path | str]] = None,
 ) -> RunContext:
@@ -43,7 +42,6 @@ def build_run_context(
             if local_repo is None or isinstance(local_repo, Path)
             else Path(local_repo)
         ),
-        model=model,
         plot_graph=plot_graph,
         add_to_config=add_to_config,
         language_version=language_version,
@@ -52,6 +50,6 @@ def build_run_context(
         top_module_override=top_module_override,
         top_file_override=(top_file_override if top_file_override is None or isinstance(top_file_override, Path) else Path(top_file_override)),
         dependency_target=dependency_target,
-        no_llama=no_llama,
         maximize_attempts=maximize_attempts,
+        max_candidates=max_candidates,
     )

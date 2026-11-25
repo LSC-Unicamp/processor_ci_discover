@@ -28,7 +28,7 @@ import shutil
 import time
 
 from ..utils.log import print_green, print_yellow, print_red, print_blue
-from ..core.api import RunContext
+from ..core.api import RunContext, CandidateResult
 
 
 def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str]:
@@ -792,7 +792,7 @@ def compile_incremental(
     max_iterations: int = 20,
     timeout: int = 300,
     context: RunContext | None = None,
-) -> Tuple[int, str, List[str]]:
+) -> Tuple[int, str, List[str], List[str], str]:
     """
     Incrementally compile VHDL starting from the top entity.
 
@@ -806,7 +806,7 @@ def compile_incremental(
         max_iterations: Maximum number of iterations
         timeout: Timeout for each GHDL command
 
-    Returns: (return_code, log, final_files)
+    Returns: (return_code, log, final_files, include_dirs, last_cmd)
     """
     if context is not None:
         max_iterations = context.maximize_attempts or max_iterations
@@ -823,6 +823,7 @@ def compile_incremental(
     try:
         current_files = [top_entity_file]
         added_files_history = set([top_entity_file])
+        last_cmd = f"ghdl -a --work={work_library or 'work'} {top_entity_file}"
 
         # Detect and filter out vendor-specific files
         vendor_files = _detect_vendor_libraries([top_entity_file], repo_root)
@@ -830,10 +831,13 @@ def compile_incremental(
             print_red(
                 f"[GHDL-INCREMENTAL] ✗ Top entity file uses vendor-specific libraries, cannot compile with GHDL"
             )
+            last_cmd = f"ghdl -a --work={work_library or 'work'} {top_entity_file}"
             return (
                 1,
                 "Top entity file contains vendor-specific libraries incompatible with GHDL",
                 current_files,
+                [],
+                last_cmd,
             )
 
         # Detect if files use a custom library name (like "neorv32" instead of "work")
@@ -891,7 +895,7 @@ def compile_incremental(
                     print_green(
                         f"[GHDL-INCREMENTAL] ✓ Elaboration successful after {iteration} iterations!"
                     )
-                    return rc_elab, output + "\n" + output_elab, current_files
+                    return rc_elab, output + "\n" + output_elab, current_files, [], last_cmd
 
                 # Elaboration failed - parse errors from elaboration output
                 print_yellow(
@@ -930,7 +934,8 @@ def compile_incremental(
                         print_green(
                             f"[GHDL-INCREMENTAL] ✓ Elaboration successful after reordering!"
                         )
-                        return rc_elab, output + "\n" + output_elab, current_files
+                        last_cmd = cmd
+                        return rc_elab, output + "\n" + output_elab, current_files, [], last_cmd
 
                     # Elaboration failed - parse errors
                     print_yellow(
@@ -1118,7 +1123,7 @@ def compile_incremental(
         print_red(
             f"[GHDL-INCREMENTAL] ✗ Failed to achieve clean compilation after {max_iterations} iterations"
         )
-        return 1, output, current_files  # Explicitly return failure code
+        return 1, output, current_files, [], last_cmd  # Explicitly return failure code
 
     finally:
         # Clean up work directory
@@ -1137,7 +1142,7 @@ def incremental_compilation(
     timeout: int = 300,
     top_module_override: Optional[str] = None,
     context: RunContext | None = None,
-) -> Tuple[bool, str, List[str], str]:
+) -> Tuple[bool, str, List[str], str, str]:
     """
     Try incremental compilation with multiple top entity candidates.
 
@@ -1149,7 +1154,7 @@ def incremental_compilation(
         ghdl_extra_flags: Additional GHDL flags
         timeout: Timeout for each operation
 
-    Returns: (success, log, final_files, selected_top)
+    Returns: (success, log, final_files, selected_top, last_cmd)
     """
     if context is not None and context.top_module_override is not None:
         top_module_override = context.top_module_override
@@ -1212,8 +1217,15 @@ def incremental_compilation(
 
         print_green(f"[GHDL-INCREMENTAL] ✓ File exists: {full_path}")
 
+        # Deduplication key: (candidate, top_entity_file)
+        dedup_key = (candidate, top_entity_file)
+        _ghdl_already_seen = context is not None and any(
+            c.top_module == dedup_key[0] and c.top_file == dedup_key[1]
+            for c in context.candidates
+        )
+
         # Try incremental compilation
-        rc, log, final_files = compile_incremental(
+        rc, log, final_files, _include_dirs, last_cmd = compile_incremental(
             repo_root,
             repo_name,
             candidate,
@@ -1223,6 +1235,16 @@ def incremental_compilation(
             timeout=timeout,
             context=context,
         )
+
+        # Determine the role / provenance for this candidate
+        if context is not None and context.top_module_override is not None:
+            role = (
+                "requested"
+                if candidate == context.top_module_override
+                else "fallback"
+            )
+        else:
+            role = "first_heuristic"
 
         if rc == 0:
             print_green(f"[GHDL-INCREMENTAL] ✓ Success with top entity: {candidate}")
@@ -1240,8 +1262,46 @@ def incremental_compilation(
                         normalized_files.append(f)
                 else:
                     normalized_files.append(f)
-            return True, log, normalized_files, candidate
+            # Record the successful candidate (only if not already recorded)
+            if not _ghdl_already_seen and context is not None:
+                context.candidates.append(
+                    CandidateResult(
+                        top_module=candidate,
+                        top_file=top_entity_file,
+                        roles=[role],
+                        heuristic_rank=0,
+                        status="success",
+                        files=list(normalized_files),
+                        include_dirs=[],
+                        extra_flags=list(ghdl_extra_flags or []),
+                        parameters={},
+                        compile_command=last_cmd,
+                        exit_code=0,
+                        errors=[],
+                        log_path=None,
+                    )
+                )
+            return True, log, normalized_files, candidate, last_cmd
 
+        # Record failure candidate (only if not already recorded)
+        if not _ghdl_already_seen and context is not None:
+            context.candidates.append(
+                CandidateResult(
+                    top_module=candidate,
+                    top_file=top_entity_file,
+                    roles=[role],
+                    heuristic_rank=0,
+                    status="failure",
+                    files=list(final_files),
+                    include_dirs=[],
+                    extra_flags=list(ghdl_extra_flags or []),
+                    parameters={},
+                    compile_command=last_cmd,
+                    exit_code=rc,
+                    errors=[],
+                    log_path=None,
+                )
+            )
         if (
             top_module_override
             and candidate == top_module_override
@@ -1253,4 +1313,4 @@ def incremental_compilation(
         print_yellow(f"[GHDL-INCREMENTAL] ✗ Failed with top entity: {candidate}")
 
     print_red("[GHDL-INCREMENTAL] All candidates failed")
-    return False, "", [], ""
+    return False, "", [], "", ""

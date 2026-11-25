@@ -29,10 +29,9 @@ Command-Line Interface:
 - `-p`, `--config-path`: Path to save the configuration file.
 - `-g`, `--plot-graph`: Plots the module dependency graph.
 - `-a`, `--add-to-config`: Adds the generated configuration to a central config file.
-- `-n`, `--no-llama`: Skip OLLAMA processing for top module identification.
-- `-m`, `--model`: OLLAMA model to use (default: 'qwen2.5:32b').
 - `-l`, `--local-repo`: Path to local repository (skips cloning if provided).
 - `-t`, `--top-module`: Force a specific top module (tried first, then fallback to heuristics).
+- `--max-candidates`: Maximum number of distinct candidates to preserve (default: 3).
 
 Usage:
 ------
@@ -47,6 +46,7 @@ python discover_config_generator.py -u <repo_url> -p config/ -t <top_module_name
 """
 
 import os
+import sys
 import time
 import json
 import shutil
@@ -54,28 +54,23 @@ import subprocess
 import re
 from pathlib import Path
 from typing import List
-from .config import save_config
+from .config import (
+    save_config,
+    save_failed_candidate_config,
+    save_successful_candidate_config,
+    save_usable_config,
+    is_usable_config,
+)
 from .file_manager import (
     remove_repo,
     find_include_dirs,
 )
-from .graph import plot_processor_graph
-from .output import create_output_json
-from .pipeline import (
-    build_and_log_graphs,
-    categorize_files,
-    clone_and_validate_repo,
-    extract_and_log_modules,
-    extract_repo_name,
-    extract_repo_owner,
-    find_and_log_files,
-    find_and_log_include_dirs,
-    handle_dependency_manager,
-    parse_bender_flist,
-    process_files_with_llama,
-)
+from .graph import plot_processor_graph, build_module_graph
+from .output import create_output_json, build_discovery_report, save_discovery_report
+from ..lang.bluespec_manager import find_bsv_files
+from ..lang.chisel_manager import find_scala_files
 from ..utils.log import print_green, print_red, print_yellow
-from .api import RunContext
+from .api import RunContext, CandidateResult
 from ..utils.runtime import build_run_context
 from .top_selection import (
     _find_cpu_core_in_soc,
@@ -232,6 +227,7 @@ def try_incremental_approach(
     timeout: int = 300,
     top_module_override: str | None = None,
     context: RunContext | None = None,
+    config_path: str = "",
 ) -> tuple:
     """
     Try the incremental bottom-up approach for Verilog/SystemVerilog files.
@@ -335,12 +331,12 @@ def try_incremental_approach(
         top_candidates = filtered_candidates
 
     # Limit number of candidates to avoid excessive testing
-    MAX_CANDIDATES_TO_TRY = 10
-    if len(top_candidates) > MAX_CANDIDATES_TO_TRY:
+    max_candidates_limit = context.max_candidates if context else 3
+    if len(top_candidates) > max_candidates_limit:
         print_yellow(
-            f"[INCREMENTAL] Limiting to top {MAX_CANDIDATES_TO_TRY} candidates (out of {len(top_candidates)})"
+            f"[INCREMENTAL] Limiting to top {max_candidates_limit} candidates (out of {len(top_candidates)})"
         )
-        top_candidates = top_candidates[:MAX_CANDIDATES_TO_TRY]
+        top_candidates = top_candidates[:max_candidates_limit]
 
     print_green(f"[INCREMENTAL] Candidates to try: {', '.join(top_candidates)}")
 
@@ -355,12 +351,70 @@ def try_incremental_approach(
                 module_to_file[mname] = mfile
 
     # Try each top candidate with incremental compilation
+    # idx is 1-based: position in the candidate list (after override prepend).
+    # This position doubles as the heuristic rank.
+    has_override = (
+        context is not None and context.top_module_override is not None
+    )
+
+    # Track the first successful candidate so we can still try remaining
+    # heuristic candidates before returning (Blocker 1).
+    first_success: tuple | None = None
+    _first_success_roles: list[str] | None = None
+    # Track independent heuristic rank for non-override candidates (Blocker 2).
+    heuristic_rank = 0
+
     for idx, top_module in enumerate(top_candidates, 1):
         print_green(
             f"[INCREMENTAL] === Candidate {idx}/{len(top_candidates)}: {top_module} ==="
         )
         if top_module not in module_to_file:
             print_yellow(f"[INCREMENTAL] Skipping {top_module} - no file mapping found")
+            # If this was an explicitly requested top, record the failure
+            # and save a failed config so it is exported (Blocker 3 residual).
+            if has_override and top_module == context.top_module_override and context is not None:
+                context.candidates.append(
+                    CandidateResult(
+                        top_module=top_module,
+                        top_file=None,
+                        roles=["requested"],
+                        heuristic_rank=1,
+                        status="failure",
+                        files=[],
+                        include_dirs=[],
+                        extra_flags=list(verilator_extra_flags or []),
+                        parameters={},
+                        compile_command="verilator --top-module " + top_module,
+                        exit_code=1,
+                        errors=[f"Module '{top_module}' not found in module list"],
+                        log_path=None,
+                    )
+                )
+                if context.config_path is None:
+                    continue
+                output_cfg = create_output_json(
+                    repo_name=repo_name,
+                    url=context.repository_url or "",
+                    filtered_files=[],
+                    include_dirs=set(),
+                    top_module=top_module,
+                    language_version=language_version,
+                    is_simulable=False,
+                )
+                output_cfg["discovery"] = {
+                    "schema_version": "2.0",
+                    "has_successful_candidate": False,
+                    "candidate_status": "failure",
+                    "candidate_count": len(context.candidates),
+                    "max_candidates": context.max_candidates,
+                }
+                save_failed_candidate_config(
+                    str(context.config_path),
+                    output_cfg,
+                    repo_name,
+                    top_module=top_module,
+                    attempt_index=idx,
+                )
             continue
 
         top_module_file = module_to_file[top_module]
@@ -394,7 +448,22 @@ def try_incremental_approach(
         else:
             print_green(f"[INCREMENTAL] ✓ File exists: {full_path}")
 
-        rc, log, final_files, final_includes = verilator_incremental(
+        # Deduplication key: (top_module, top_file).
+        # Prevents recording the same candidate twice when the loop
+        # is called from multiple discovery paths.
+        dedup_key = (top_module, top_module_file)
+
+        # Check if this candidate was already recorded (e.g. by a prior
+        # pass through try_incremental_approach or ghdl_incremental).
+        # If found, merge the new role into the existing entry (Blocker 2).
+        _existing_idx: int | None = None
+        if context is not None:
+            for _i, _c in enumerate(context.candidates):
+                if _c.top_module == dedup_key[0] and _c.top_file == dedup_key[1]:
+                    _existing_idx = _i
+                    break
+
+        rc, log, final_files, final_includes, _verilator_last_cmd = verilator_incremental(
             repo_root=repo_root,
             top_module=top_module,
             top_module_file=top_module_file,
@@ -413,10 +482,125 @@ def try_incremental_approach(
             context=context,
         )
 
+        # Determine the role / provenance for this candidate.
+        # Blocker 2 fix: the override candidate is separate from heuristics.
+        # Non-override candidates track their own independent rank.
+        if has_override and top_module == context.top_module_override:
+            role = "requested"
+            heuristic_rank = 0  # override candidates don't have a heuristic rank
+        else:
+            heuristic_rank += 1
+            role = "first_heuristic" if heuristic_rank == 1 else "fallback"
+
         if rc == 0:
             print_green(f"[INCREMENTAL] ✓ Success with top module: {top_module}")
-            return final_files, final_includes, log, top_module, True
+            # Record the successful candidate. If already seen, merge the role
+            # instead of duplicating (Blocker 2).
+            if _existing_idx is not None and context is not None:
+                context.candidates[_existing_idx].roles.append(role)
+            else:
+                if context is not None:
+                    context.candidates.append(
+                        CandidateResult(
+                            top_module=top_module,
+                            top_file=top_module_file,
+                            roles=[role],
+                            heuristic_rank=heuristic_rank,
+                            status="compilation_success",
+                            files=list(final_files),
+                            include_dirs=list(final_includes),
+                            extra_flags=list(verilator_extra_flags or []),
+                            parameters={},
+                            compile_command=_verilator_last_cmd,
+                            exit_code=0,
+                            errors=[],
+                            log_path=None,
+                        )
+                    )
+            # Record the first successful candidate and continue trying
+            # remaining heuristic candidates before returning (Blocker 1).
+            if first_success is None:
+                first_success = (final_files, final_includes, log, top_module, True)
+                _first_success_roles = [role]
         else:
+            # Capture diagnostics from the runner log for the failure report.
+            error_lines = []
+            if log:
+                for line in log.splitlines():
+                    stripped = line.strip()
+                    if any(
+                        kw in stripped.lower()
+                        for kw in ("error", "undefined", "fatal", "could not find", "syntax error", "conflict")
+                    ):
+                        error_lines.append(stripped)
+            # If no explicit error lines found, use the last 5 log lines as diagnostics.
+            if not error_lines and log:
+                error_lines = log.splitlines()[-5:]
+
+            failure_log_path = None
+            if context is not None:
+                discovery_dir = os.path.join("discovery", repo_name, "logs")
+                os.makedirs(discovery_dir, exist_ok=True)
+                safe_top = re.sub(r"[^a-zA-Z0-9_]", "_", top_module or "unknown")
+                failure_log_path = os.path.join(
+                    discovery_dir, f"{safe_top}_attempt.log"
+                )
+                try:
+                    with open(failure_log_path, "w", encoding="utf-8") as lf:
+                        lf.write(log or "")
+                except Exception:
+                    failure_log_path = None
+
+            # Record failure candidate. If already seen, merge the role
+            # instead of duplicating (Blocker 2).
+            if _existing_idx is not None and context is not None:
+                context.candidates[_existing_idx].roles.append(role)
+            else:
+                if context is not None:
+                    context.candidates.append(
+                        CandidateResult(
+                            top_module=top_module,
+                            top_file=top_module_file,
+                            roles=[role],
+                            heuristic_rank=heuristic_rank,
+                            status="failure",
+                            files=list(final_files),
+                            include_dirs=list(final_includes),
+                            extra_flags=list(verilator_extra_flags or []),
+                            parameters={},
+                            compile_command=_verilator_last_cmd,
+                            exit_code=rc,
+                            errors=error_lines,
+                            log_path=failure_log_path,
+                        )
+                    )
+
+            # Save the failed config to candidates/ directory
+            if _existing_idx is None and context is not None and context.config_path is not None:
+                output_cfg = create_output_json(
+                    repo_name=repo_name,
+                    url=context.repository_url or "",
+                    filtered_files=list(final_files),
+                    include_dirs=final_includes,
+                    top_module=top_module,
+                    language_version=language_version,
+                    is_simulable=False,
+                )
+                output_cfg["discovery"] = {
+                    "schema_version": "2.0",
+                    "has_successful_candidate": False,
+                    "candidate_status": "failure",
+                    "candidate_count": len(context.candidates),
+                    "max_candidates": context.max_candidates,
+                }
+                save_failed_candidate_config(
+                    str(context.config_path),
+                    output_cfg,
+                    repo_name,
+                    top_module=top_module,
+                    attempt_index=idx,
+                )
+
             if (
                 top_module_override
                 and top_module == top_module_override
@@ -427,7 +611,29 @@ def try_incremental_approach(
                 )
             print_yellow(f"[INCREMENTAL] ✗ Failed with top module: {top_module}")
 
-    # If all failed, return empty result
+    # Return the first successful candidate (if any), otherwise the failure result
+    if first_success is not None:
+        files, includes, _log, top_module, _success = first_success
+        # Coordinator claim (b) fix: save standalone config for successful
+        # candidates so downstream consumers can inspect role-selected artifacts.
+        if context is not None and context.config_path is not None and _first_success_roles is not None:
+            output_cfg = create_output_json(
+                repo_name=repo_name,
+                url=context.repository_url or "",
+                filtered_files=list(files),
+                include_dirs=includes,
+                top_module=top_module,
+                language_version=language_version,
+                is_simulable=False,
+            )
+            save_successful_candidate_config(
+                str(context.config_path),
+                output_cfg,
+                repo_name,
+                top_module=top_module,
+                roles=_first_success_roles,
+            )
+        return first_success
     return [], set(), "", "", False
 
 
@@ -525,15 +731,18 @@ def interactive_simulate_and_minimize(
             print_yellow(
                 f"[TOP] Using user-specified top module override: {top_module_override}"
             )
-            primary_top = top_module_override
-            # Ensure the override is tried first, keep heuristics as fallback
-            candidates = [top_module_override] + [
-                c for c in candidates if c != top_module_override
-            ]
         else:
             print_yellow(
-                f"[TOP] Warning: top module override '{top_module_override}' not found in extracted modules; falling back to heuristics"
+                f"[TOP] Warning: top module override '{top_module_override}' not found in extracted modules; will still attempt to record failure"
             )
+        primary_top = top_module_override
+        # Always prepend the override so it is tried first and failures are
+        # recorded (fix for coordinator discrepancy: unreachable branch).
+        # If the override is not in module_to_file the loop will skip it and
+        # save a failed config; if it exists it compiles like any other candidate.
+        candidates = [top_module_override] + [
+            c for c in candidates if c != top_module_override
+        ]
     if (
         primary_top
         and not top_module_override
@@ -681,7 +890,7 @@ def interactive_simulate_and_minimize(
         )
 
         print_green(f"[CORE] Trying incremental bottom-up GHDL approach first...")
-        is_simulable, last_log, final_files, top_module = ghdl_incremental(
+        is_simulable, last_log, final_files, top_module, _ghdl_last_cmd = ghdl_incremental(
             repo_root=repo_root,
             repo_name=repo_name,
             top_candidates=vhdl_candidates,
@@ -774,7 +983,7 @@ def interactive_simulate_and_minimize(
         )
 
         print_green(f"[CORE] Trying fallback incremental GHDL approach...")
-        is_simulable, last_log, final_files, top_module = ghdl_incremental(
+        is_simulable, last_log, final_files, top_module, _ghdl_last_cmd = ghdl_incremental(
             repo_root=repo_root,
             repo_name=repo_name,
             top_candidates=vhdl_candidates,
@@ -815,14 +1024,13 @@ def generate_processor_config(
     config_path: str,
     plot_graph: bool = False,
     add_to_config: bool = False,
-    no_llama: bool = False,
-    model: str = "qwen2.5:32b",
     local_repo: str = None,
     top_module_override: str | None = None,
     context: RunContext | None = None,
     core_name: str | None = None,
     top_file_override: str | None = None,
     dependency_target: str | None = None,
+    max_candidates: int = 3,
 ) -> dict:
     """
     Main function to generate a processor configuration.
@@ -832,11 +1040,10 @@ def generate_processor_config(
         config_path: Path to save configuration
         plot_graph: Whether to plot dependency graphs
         add_to_config: Whether to add to central config
-        no_llama: Skip OLLAMA processing
-        model: OLLAMA model to use
         local_repo: Path to local repository (skips cloning if provided)
+        max_candidates: Maximum number of distinct candidates to explore
     """
-    repo_name = core_name or extract_repo_name(url)
+    repo_name = core_name or _extract_repo_name(url)
     if core_name is None:
         existing_config = Path(config_path) / f"{repo_name}.json"
         if existing_config.exists():
@@ -867,20 +1074,18 @@ def generate_processor_config(
         repository_url=url,
         config_path=config_path,
         local_repo=local_repo,
-        model=model,
         plot_graph=plot_graph,
         add_to_config=add_to_config,
-        no_llama=no_llama,
         top_module_override=top_module_override,
         top_file_override=top_file_override,
         dependency_target=dependency_target,
+        max_candidates=max_candidates,
     )
     if context is not None:
         run_context.repo_name = repo_name
         run_context.repository_url = url
         run_context.config_path = Path(config_path)
         run_context.local_repo = Path(local_repo) if local_repo is not None else None
-        run_context.model = model
         run_context.plot_graph = plot_graph
         run_context.add_to_config = add_to_config
         run_context.top_module_override = (
@@ -888,7 +1093,6 @@ def generate_processor_config(
         )
         run_context.top_file_override = Path(top_file_override) if top_file_override else run_context.top_file_override
         run_context.dependency_target = dependency_target or run_context.dependency_target
-        run_context.no_llama = no_llama if context is None else context.no_llama
 
     config_path = str(run_context.config_path or config_path)
     local_repo = (
@@ -896,7 +1100,6 @@ def generate_processor_config(
         if run_context.local_repo is not None
         else local_repo
     )
-    model = run_context.model
     plot_graph = run_context.plot_graph
     add_to_config = run_context.add_to_config
 
@@ -929,20 +1132,20 @@ def generate_processor_config(
                     f"[LOG] Using provided path (no .git found): {destination_path}"
                 )
     else:
-        destination_path = clone_and_validate_repo(url, repo_name)
+        destination_path = _clone_and_validate_repo(url, repo_name)
         if not destination_path:
             return {}
 
     # Handle dependency managers (Bender, FuseSoC, etc.)
     # This must be done BEFORE scanning for files since it fetches external dependencies
-    deps_fetched = handle_dependency_manager(
+    deps_fetched = _handle_dependency_manager(
         destination_path, repo_name, top_module_override, run_context.dependency_target
     )
     run_context.cache["dependency_manifest"] = deps_fetched
     if deps_fetched:
         print_green(f"[DEPS] Dependencies fetched - rescanning files and includes...")
 
-    files, extension = find_and_log_files(destination_path)
+    files, extension = _find_and_log_files(destination_path)
     run_context.repo_root = Path(destination_path)
 
     # Check if this is a Bluespec project
@@ -971,13 +1174,73 @@ def generate_processor_config(
         if not os.path.exists(config_path):
             os.makedirs(config_path)
 
-        config_file = os.path.join(config_path, f"{repo_name}.json")
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4)
+        # Build discovery block for Bluespec
+        discovery_block = {
+            "schema_version": "2.0",
+            "has_successful_candidate": True,
+            "candidate_count": 1,
+            "candidate_status": "success",
+            "max_candidates": run_context.max_candidates,
+        }
+        config["discovery"] = discovery_block
 
-        if add_to_config:
+        # Save configuration (only if usable)
+        print_green("[LOG] Salvando configuração\n")
+        if not os.path.exists(config_path):
+            os.makedirs(config_path)
+
+        # Coordinator claim (b) fix: standalone config for the successful
+        # Bluespec candidate before the main save.
+        save_successful_candidate_config(
+            str(config_path),
+            config,
+            repo_name,
+            top_module=config.get("top_module"),
+            roles=["first_heuristic"],
+        )
+
+        config_file = save_usable_config(config_path, config, repo_name)
+        if config_file is not None and add_to_config and is_usable_config(config):
             central_config_path = os.path.join(config_path, "config.json")
             save_config(central_config_path, config, repo_name)
+
+        # Log for Bluespec
+        discovery_dir = os.path.join("discovery", repo_name, "logs")
+        os.makedirs(discovery_dir, exist_ok=True)
+        log_path = os.path.join(discovery_dir, "bluespec.log")
+        try:
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                log_file.write("Bluespec project processed")
+        except Exception:
+            pass
+
+        # Discovery report
+        try:
+            candidate_result = CandidateResult(
+                top_module=config.get("top_module", ""),
+                top_file="",
+                roles=["first_heuristic"],
+                heuristic_rank=1,
+                status="compilation_success",
+                files=config.get("sim_files", []),
+                include_dirs=[],
+                extra_flags=config.get("extra_flags", []),
+                parameters={},
+                compile_command="",
+                exit_code=0,
+                errors=[],
+                log_path=log_path,
+            )
+            report = build_discovery_report(
+                repo_name=repo_name,
+                repository_url=url,
+                candidates=[candidate_result],
+                successful_candidate=candidate_result,
+                output_json=config,
+            )
+            save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+        except Exception:
+            pass
 
         if not local_repo:
             remove_repo(repo_name)
@@ -1004,13 +1267,68 @@ def generate_processor_config(
         if not os.path.exists(config_path):
             os.makedirs(config_path)
 
-        config_file = os.path.join(config_path, f"{repo_name}.json")
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4)
+        # Coordinator claim (b) fix: standalone config for the successful
+        # Chisel candidate before the main save.
+        save_successful_candidate_config(
+            str(config_path),
+            config,
+            repo_name,
+            top_module=config.get("top_module"),
+            roles=["first_heuristic"],
+        )
 
-        if add_to_config:
+        config_file = save_usable_config(config_path, config, repo_name)
+        if config_file is not None and add_to_config and is_usable_config(config):
             central_config_path = os.path.join(config_path, "config.json")
             save_config(central_config_path, config, repo_name)
+
+        # Discovery block for Chisel
+        discovery_block = {
+            "schema_version": "2.0",
+            "has_successful_candidate": True,
+            "candidate_count": 1,
+            "candidate_status": "success",
+            "max_candidates": run_context.max_candidates,
+        }
+        config["discovery"] = discovery_block
+
+        # Log for Chisel
+        discovery_dir = os.path.join("discovery", repo_name, "logs")
+        os.makedirs(discovery_dir, exist_ok=True)
+        log_path = os.path.join(discovery_dir, "chisel.log")
+        try:
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                log_file.write("Chisel project processed")
+        except Exception:
+            pass
+
+        # Discovery report
+        try:
+            candidate_result = CandidateResult(
+                top_module=config.get("top_module", ""),
+                top_file="",
+                roles=["first_heuristic"],
+                heuristic_rank=1,
+                status="compilation_success",
+                files=config.get("sim_files", []),
+                include_dirs=[],
+                extra_flags=config.get("extra_flags", []),
+                parameters={},
+                compile_command="",
+                exit_code=0,
+                errors=[],
+                log_path=log_path,
+            )
+            report = build_discovery_report(
+                repo_name=repo_name,
+                repository_url=url,
+                candidates=[candidate_result],
+                successful_candidate=candidate_result,
+                output_json=config,
+            )
+            save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+        except Exception:
+            pass
 
         # Cleanup
         if not local_repo:
@@ -1022,7 +1340,7 @@ def generate_processor_config(
         return config
 
     # Continue with HDL processing (existing code)
-    modulename_list, modules = extract_and_log_modules(files, destination_path)
+    modulename_list, modules = _extract_and_log_modules(files, destination_path)
     run_context.module_files = [
         Path(
             os.path.relpath(file_path, destination_path)
@@ -1032,7 +1350,7 @@ def generate_processor_config(
         for _, file_path in modules
     ]
 
-    tb_files, non_tb_files = categorize_files(files, repo_name, destination_path)
+    tb_files, non_tb_files = _categorize_files(files, repo_name, destination_path)
     # Exclude FPGA board wrapper trees from consideration to avoid picking board 'top' modules
     orig_tb, orig_non_tb = len(tb_files), len(non_tb_files)
     non_fpga_hdl = [
@@ -1077,7 +1395,7 @@ def generate_processor_config(
             ]
     except Exception:
         pass
-    include_dirs = find_and_log_include_dirs(destination_path)
+    include_dirs = _find_and_log_include_dirs(destination_path)
     fusesoc_flist = os.path.join(destination_path, ".fusesoc_flist")
     if os.path.exists(fusesoc_flist):
         with open(fusesoc_flist, encoding="utf-8") as flist:
@@ -1131,7 +1449,7 @@ def generate_processor_config(
                 )
 
         # Also parse the flist for any additional includes
-        bender_files, bender_includes = parse_bender_flist(destination_path)
+        bender_files, bender_includes = _parse_bender_flist(destination_path)
         if bender_files:
             run_context.cache["bender_files"] = bender_files
             defines = []
@@ -1156,20 +1474,12 @@ def generate_processor_config(
         run_context.cache["bender_includes"] = list(bender_includes)
         run_context.include_dirs = [Path(include_dir) for include_dir in include_dirs]
 
-    module_graph, module_graph_inverse = build_and_log_graphs(
+    module_graph, module_graph_inverse = _build_and_log_graphs(
         non_tb_files, modules, destination_path
     )
-    filtered_files, top_module = process_files_with_llama(
-        run_context.no_llama,
-        non_tb_files,
-        tb_files,
-        modules,
-        module_graph,
-        repo_name,
-        model,
-    )
+    # Determine language version from all non-TB files (LLM removed in Phase 1)
     language_version = determine_language_version(
-        extension, filtered_files, destination_path
+        extension, non_tb_files, destination_path
     )
     run_context.language_version = language_version
 
@@ -1201,7 +1511,7 @@ def generate_processor_config(
             repo_name=repo_name,
             url=url,
             tb_files=tb_files,
-            candidate_files=filtered_files,
+            candidate_files=non_tb_files,
             include_dirs=set(include_dirs),
             modules=modules,
             module_graph=module_graph,
@@ -1298,34 +1608,154 @@ def generate_processor_config(
         language_version_out,
         is_simulable,
     )
+
+    # Blocker 6: is_simulable reflects actual simulation, not just compilation.
+    # The validation gate uses the validation level and evidence from candidates.
+    # Blocker 1 residual: pick the FIRST successful candidate, not the last tried
+    # (candidates[-1] would be wrong when early pass / later fail).
+    _validation_passed = False
+    _validation_level: str | None = None
+    _validation_evidence: str | None = None
+    _best: CandidateResult | None = None
+    if run_context.candidates:
+        # Prefer the first successful candidate; fall back to the last tried.
+        for _c in run_context.candidates:
+            if _c.status == "compilation_success":
+                _best = _c
+                break
+        if _best is None:
+            _best = run_context.candidates[-1]
+        if _best.status == "compilation_success":
+            _validation_passed = True
+            _validation_level = "compilation_success"
+            _validation_evidence = (
+                f"lint/compile succeeded for {_best.top_module}"
+                + (f" ({len(_best.errors)} error lines in log)" if _best.log_path else "")
+            )
+
+    discovery_block = {
+        "schema_version": "2.0",
+        "has_successful_candidate": _validation_passed,
+        "candidate_count": len(run_context.candidates),
+        "candidate_status": "compilation_success" if _validation_passed else "failure",
+        "max_candidates": run_context.max_candidates,
+        "validation_gate": {
+            "passed": _validation_passed,
+            "level": _validation_level or "none",
+            "evidence": _validation_evidence or "no candidates tried",
+        },
+    }
     if run_context.cache.get("bender_defines"):
         output_json["extra_flags"] = run_context.cache["bender_defines"]
         output_json["pre_script"] = "bender checkout"
 
-    # Save configuration
+    # Build discovery block and candidate result.
+    # The incremental functions (try_incremental_approach / ghdl_incremental)
+    # already recorded every candidate they tried, so we only create a
+    # final CandidateResult here when no candidates were recorded yet
+    # (i.e. the old path where interactive_simulate_and_minimize returned
+    # without a context or when the caller never passed one).
+    if not run_context.candidates:
+        role_labels = ["requested"] if run_context.top_module_override else ["first_heuristic"]
+        # In the fallback path the runner already succeeded/failed — use the
+        # runner's is_simulable flag since no candidates exist to re-evaluate.
+        fallback_succeeded = is_simulable
+        candidate_result = CandidateResult(
+            top_module=top_module,
+            top_file=str(run_context.top_file_override) if run_context.top_file_override else "",
+            roles=role_labels,
+            heuristic_rank=1,
+            status="compilation_success" if fallback_succeeded else "failure",
+            files=list(final_files),
+            include_dirs=list(relative_include_dirs),
+            extra_flags=list(output_json.get("extra_flags", [])),
+            parameters={},
+            compile_command="verilator --top-module " + top_module if top_module else "",
+            exit_code=0 if fallback_succeeded else 1,
+            errors=[],
+            log_path=None,
+        )
+        run_context.candidates.append(candidate_result)
+        # Re-evaluate _validation_passed now that a candidate exists
+        if candidate_result.status == "compilation_success":
+            _validation_passed = True
+            _validation_level = "compilation_success"
+            _validation_evidence = (
+                f"lint/compile succeeded for {candidate_result.top_module}"
+            )
+
+    output_json["discovery"] = discovery_block
+
+    # Blocker 6 residual: the top-level is_simulable must reflect the
+    # validation gate (_validation_passed), not the runner's lint-only flag.
+    output_json["is_simulable"] = _validation_passed
+
+    # Save configuration (only if usable)
+    # When no candidate succeeded, the discovery block marks the config
+    # as non-usable.  We also remove any stale output from a previous
+    # successful run so that downstream consumers don't read a stale file.
     print_green("[LOG] Salvando configuração\n")
     if not os.path.exists(config_path):
         os.makedirs(config_path)
 
-    config_file = os.path.join(config_path, f"{repo_name}.json")
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(output_json, f, indent=4)
+    config_file = save_usable_config(config_path, output_json, repo_name)
 
-    if add_to_config:
+    # Coordinator claim (b) fix: save standalone config for successful
+    # candidates in the main flow so downstream consumers can inspect
+    # role-selected artifacts.
+    if _best is not None and _best.status == "compilation_success":
+        save_successful_candidate_config(
+            str(config_path),
+            output_json,
+            repo_name,
+            top_module=_best.top_module,
+            roles=_best.roles,
+        )
+    if config_file is None:
+        print_yellow("[WARN] Config rejected (not usable); skipping main output")
+        # Remove stale output from a prior successful run
+        stale = os.path.join(config_path, f"{repo_name}.json")
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+                print_green(f"[LOG] Removed stale config: {stale}")
+            except Exception:
+                pass
+
+    if add_to_config and is_usable_config(output_json):
         central_config_path = os.path.join(config_path, "config.json")
         save_config(central_config_path, output_json, repo_name)
+    # Blocker 7: Do NOT delete the shared central config.json when one core fails.
+    # Other cores may be writing to the same central index concurrently.
 
-    # Save runner output log (lint/analyze/minimize transcript)
-    print_green("[LOG] Salvando o log em logs/\n")
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
+    # Save runner output log to discovery/ tree
+    discovery_dir = os.path.join("discovery", repo_name, "logs")
+    os.makedirs(discovery_dir, exist_ok=True)
+    log_path = os.path.join(discovery_dir, "requesting.log")
     try:
-        ts = f"{time.time():.0f}"
-        with open(f"logs/{repo_name}_{ts}.log", "w", encoding="utf-8") as log_file:
-            # last_log may be large; write as plain text
+        with open(log_path, "w", encoding="utf-8") as log_file:
             log_file.write(last_log or "")
+        print_green(f"[LOG] Log saved to {log_path}")
     except Exception as e:
         print_yellow(f"[WARN] Falha ao salvar o log: {e}")
+
+    # Attach the main log path to the best (first successful) candidate.
+    if _best is not None:
+        _best.log_path = log_path
+
+    # Save full discovery report
+    try:
+        report = build_discovery_report(
+            repo_name=repo_name,
+            repository_url=url,
+            candidates=run_context.candidates,
+            successful_candidate=_best if _best and _best.status == "compilation_success" else None,
+            output_json=output_json,
+        )
+        report_path = save_discovery_report(report, os.path.join("discovery", repo_name), repo_name)
+        print_green(f"[LOG] Discovery report saved to {report_path}")
+    except Exception as e:
+        print_yellow(f"[WARN] Could not save discovery report: {e}")
 
     # Cleanup - only remove if we cloned it (not using local repo)
     if not local_repo:
@@ -1352,12 +1782,512 @@ def generate_processor_config(
     return output_json
 
 
+# ---------------------------------------------------------------------------
+# Pipeline helpers — migrated from core/pipeline.py (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def _extract_repo_name(url: str) -> str:
+    """Extracts the repository name from the given URL."""
+    return url.split("/")[-1].replace(".git", "")
+
+
+def _extract_repo_owner(url: str) -> str:
+    """Extract the repository owner from a conventional Git URL."""
+    normalized = url.rstrip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    parts = normalized.replace(":", "/").split("/")
+    return parts[-2] if len(parts) >= 2 else ""
+
+
+def _detect_and_run_config_script(repo_path: str, repo_name: str) -> bool:
+    """
+    Detects and runs configuration scripts that generate necessary defines/headers.
+    """
+    # Pattern 1: configs directory with scripts
+    config_dir = os.path.join(repo_path, "configs")
+    if os.path.isdir(config_dir):
+        config_files = []
+        for f in os.listdir(config_dir):
+            full_path = os.path.join(config_dir, f)
+            if f.endswith((".config", ".py")) or (
+                os.access(full_path, os.X_OK) and not f.startswith(".")
+            ):
+                config_files.append(f)
+
+        if config_files:
+            config_file = config_files[0]
+            config_script = os.path.join(config_dir, config_file)
+            print_yellow(f"[CONFIG] Found configuration script: {config_script}")
+
+            try:
+                os.chmod(config_script, 0o755)
+            except Exception:
+                pass
+
+            env = os.environ.copy()
+            env["RV_ROOT"] = repo_path
+            env["ROOT"] = repo_path
+            env["REPO_ROOT"] = repo_path
+
+            if config_file.endswith(".py"):
+                base_cmd = ["python3", config_script]
+            else:
+                base_cmd = [config_script]
+
+            arg_patterns = [[], ["-target=default"], ["--default"]]
+
+            for args in arg_patterns:
+                cmd = base_cmd + args
+                cmd_str = " ".join(cmd)
+                print_yellow(f"[CONFIG] Attempting: {cmd_str}")
+
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        cwd=repo_path,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+
+                    if result.returncode == 0:
+                        print_green(
+                            f"[CONFIG] Configuration script completed successfully"
+                        )
+                        return True
+                    else:
+                        error_msg = result.stderr if result.stderr else result.stdout
+                        if "Can't locate" in error_msg or "BEGIN failed" in error_msg:
+                            print_yellow(
+                                f"[CONFIG] Config script requires dependencies: {error_msg.split(chr(10))[0]}"
+                            )
+                            return False
+                        elif "usage:" in error_msg.lower() and args == []:
+                            continue
+                        else:
+                            continue
+
+                except subprocess.TimeoutExpired:
+                    print_yellow(f"[CONFIG] Config script timed out")
+                    return False
+                except Exception as e:
+                    print_yellow(f"[CONFIG] Could not run config script: {str(e)}")
+                    continue
+
+            print_yellow(
+                f"[CONFIG] Config script found but could not determine correct arguments, continuing..."
+            )
+            return False
+
+    return False
+
+
+def _clone_and_validate_repo(url: str, repo_name: str) -> str:
+    """Clones the repository and validates the operation."""
+    from .file_manager import clone_repo
+
+    destination_path = clone_repo(url, repo_name)
+    if not destination_path:
+        print_red("[ERROR] Não foi possível clonar o repositório.")
+    else:
+        print_green("[LOG] Repositório clonado com sucesso\n")
+        abs_path = os.path.abspath(destination_path)
+        _detect_and_run_config_script(abs_path, repo_name)
+
+    return destination_path
+
+
+def _find_and_log_files(destination_path: str) -> tuple:
+    """Finds files with specific extensions in the repository and logs the result."""
+    print_green(
+        "[LOG] Procurando arquivos com extensão .v, .sv, .vhdl, .vhd, .scala ou .bsv\n"
+    )
+
+    fusesoc_flist = os.path.join(destination_path, ".fusesoc_flist")
+    if os.path.exists(fusesoc_flist):
+        with open(fusesoc_flist, encoding="utf-8") as flist:
+            files = [line.strip() for line in flist if line.strip()]
+        if files:
+            extension = ".sv" if any(path.endswith((".sv", ".svh")) for path in files) else ".v"
+            print_green(f"[DEPS] Using {len(files)} files from FuseSoC manifest")
+            return files, extension
+
+    bsv_files = find_bsv_files(destination_path)
+    if bsv_files:
+        print_green(
+            f"[LOG] Encontrados {len(bsv_files)} arquivos Bluespec - projeto BSV detectado\n"
+        )
+        return bsv_files, ".bsv"
+
+    scala_files = find_scala_files(destination_path)
+    if scala_files:
+        print_green(
+            f"[LOG] Encontrados {len(scala_files)} arquivos Scala - projeto Chisel detectado\n"
+        )
+        return scala_files, ".scala"
+
+    from .file_manager import find_files_with_extension
+
+    files, extension = find_files_with_extension(
+        destination_path, ["v", "sv", "vhdl", "vhd"]
+    )
+    if not files:
+        unfiltered_files, extension = find_files_with_extension(
+            destination_path, ["v", "sv", "vhdl", "vhd"], exclude_filtered=False
+        )
+        fpga_src_marker = f"{os.sep}fpga{os.sep}src{os.sep}"
+        files = [path for path in unfiltered_files if fpga_src_marker in path]
+        if files:
+            print_yellow(
+                f"[FILTER] Found {len(files)} synthesizable files under fpga/src"
+            )
+    return files, extension
+
+
+def _extract_and_log_modules(files: list, destination_path: str) -> tuple[list, list]:
+    """Extracts module information from files and logs the result."""
+    print_green("[LOG] Extraindo módulos dos arquivos\n")
+    from .file_manager import extract_modules
+
+    modules = extract_modules(files)
+    print_green("[LOG] Módulos extraídos com sucesso\n")
+    return [
+        {
+            "module": module_name,
+            "file": os.path.relpath(file_path, destination_path),
+        }
+        for module_name, file_path in modules
+    ], modules
+
+
+def _categorize_files(files: list, repo_name: str, destination_path: str) -> tuple:
+    """Categorizes files into testbench and non-testbench files."""
+    from .file_manager import is_testbench_file
+
+    tb_files, non_tb_files = [], []
+    for f in files:
+        if is_testbench_file(f, repo_name):
+            tb_files.append(f)
+        else:
+            non_tb_files.append(f)
+    return (
+        [os.path.relpath(tb_f, destination_path) for tb_f in tb_files],
+        [os.path.relpath(non_tb_f, destination_path) for non_tb_f in non_tb_files],
+    )
+
+
+def _handle_dependency_manager(
+    destination_path: str,
+    repo_name: str,
+    top_module_override: str | None = None,
+    dependency_target: str | None = None,
+) -> bool:
+    """Detect and run dependency managers (Bender, FuseSoC) to fetch external dependencies."""
+    import tempfile
+
+    bender_yml = os.path.join(destination_path, "Bender.yml")
+    bender_found = os.path.exists(bender_yml)
+
+    if not bender_found:
+        candidate_benders = []
+        for root, dirs, files in os.walk(destination_path):
+            if "Bender.yml" in files:
+                candidate_benders.append(os.path.join(root, "Bender.yml"))
+
+        if candidate_benders:
+            selected_bender = None
+            for candidate in candidate_benders:
+                try:
+                    with open(candidate, "r") as f:
+                        content = f.read()
+                        match = re.search(
+                            r'^\s*name:\s*["\']?(\w+)["\']?\s*$', content, re.MULTILINE
+                        )
+                        if match:
+                            pkg_name = match.group(1)
+                            if pkg_name.lower() == repo_name.lower():
+                                selected_bender = candidate
+                                print_yellow(
+                                    f"[DEPS] Found matching Bender.yml: {os.path.relpath(candidate, destination_path)} (package: {pkg_name})"
+                                )
+                                break
+                except Exception:
+                    continue
+
+            if not selected_bender:
+                selected_bender = candidate_benders[0]
+                print_yellow(
+                    f"[DEPS] Using first Bender.yml found: {os.path.relpath(selected_bender, destination_path)}"
+                )
+
+            bender_yml = selected_bender
+            bender_found = True
+
+    if bender_found:
+        print_yellow(f"[DEPS] Detected Bender.yml - fetching dependencies...")
+
+        try:
+            result = subprocess.run(
+                ["bender", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                print_yellow(
+                    f"[DEPS] Bender not installed. Install with: cargo install bender"
+                )
+                return False
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            print_yellow(f"[DEPS] Bender not found. Install with: cargo install bender")
+            print_yellow(
+                f"[DEPS] Skipping dependency fetch - some modules may be missing"
+            )
+            return False
+
+        bender_dir = os.path.dirname(bender_yml)
+        bender_rel_dir = os.path.relpath(bender_dir, destination_path)
+        try:
+            print_yellow(f"[DEPS] Running 'bender checkout' for {bender_rel_dir}...")
+            result = subprocess.run(
+                ["bender", "checkout", "--dir", bender_rel_dir],
+                cwd=destination_path,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if result.returncode == 0:
+                print_green(f"[DEPS] Successfully checked out dependencies with Bender")
+
+                try:
+                    print_yellow(f"[DEPS] Generating file list with 'bender script flist'...")
+                    flist_command = [
+                        "bender", "script",
+                        "verilator" if dependency_target else "flist",
+                        "--dir", bender_rel_dir,
+                    ]
+                    if not dependency_target:
+                        flist_command.append("--relative-path")
+                    if dependency_target:
+                        flist_command.extend(["--target", dependency_target])
+                    result_flist = subprocess.run(
+                        flist_command,
+                        cwd=destination_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if result_flist.returncode == 0 and result_flist.stdout:
+                        flist_path = os.path.join(destination_path, ".bender_flist")
+                        with open(flist_path, "w") as f:
+                            f.write(result_flist.stdout)
+                        print_green(f"[DEPS] Saved Bender file list to .bender_flist")
+                except Exception as e:
+                    print_yellow(f"[DEPS] Could not generate flist: {e}")
+
+                return True
+            else:
+                print_yellow(f"[DEPS] Bender checkout failed:")
+                if result.stderr:
+                    print_yellow(f"[DEPS]   {result.stderr[:500]}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            print_yellow(f"[DEPS] Bender checkout timed out")
+            return False
+        except Exception as e:
+            print_yellow(f"[DEPS] Error running Bender: {e}")
+            return False
+
+    # Check for FuseSoC
+    fusesoc_cores = [
+        file for file in os.listdir(destination_path) if file.endswith(".core")
+    ]
+    fusesoc_core = fusesoc_cores[0] if fusesoc_cores else None
+    if top_module_override:
+        for candidate in fusesoc_cores:
+            try:
+                candidate_text = open(
+                    os.path.join(destination_path, candidate), encoding="utf-8"
+                ).read()
+            except OSError:
+                continue
+            if re.search(
+                rf"\btoplevel\s*:\s*(?:\[[^\]]*\b)?{re.escape(top_module_override)}\b",
+                candidate_text,
+            ):
+                fusesoc_core = candidate
+                break
+
+    if fusesoc_core:
+        print_yellow(f"[DEPS] Detected FuseSoC core file: {fusesoc_core}")
+        import yaml
+
+        core_path = os.path.join(destination_path, fusesoc_core)
+        try:
+            core_text = open(core_path, encoding="utf-8").read()
+            if core_text.startswith("CAPI=2:"):
+                core_text = core_text.split("\n", 1)[1]
+            core_data = yaml.safe_load(core_text) or {}
+            vlnv = str(core_data.get("name", "")).strip()
+            targets = core_data.get("targets", {}) or {}
+            target = "default"
+            if top_module_override:
+                matching_targets = []
+                for target_name, target_data in targets.items():
+                    toplevel = (target_data or {}).get("toplevel", [])
+                    if isinstance(toplevel, str):
+                        toplevel = [toplevel]
+                    if top_module_override in toplevel:
+                        matching_targets.append((target_name, target_data or {}))
+                if matching_targets:
+                    target = next(
+                        (
+                            name
+                            for name, data in matching_targets
+                            if data.get("default_tool") or data.get("tools") or data.get("flow")
+                        ),
+                        matching_targets[0][0],
+                    )
+
+            fusesoc = shutil.which("fusesoc")
+            sibling_fusesoc = os.path.join(os.path.dirname(sys.executable), "fusesoc")
+            if not fusesoc and os.path.exists(sibling_fusesoc):
+                fusesoc = sibling_fusesoc
+            if not fusesoc or not vlnv:
+                print_yellow("[DEPS] FuseSoC executable or core name unavailable")
+                return False
+
+            generated_flist = os.path.join(destination_path, ".fusesoc_flist")
+            if os.path.exists(generated_flist):
+                os.remove(generated_flist)
+
+            with tempfile.TemporaryDirectory(prefix="processor-ci-fusesoc-") as work:
+                env = os.environ.copy()
+                env["XDG_CACHE_HOME"] = os.path.join(work, "cache")
+                result = subprocess.run(
+                    [
+                        fusesoc,
+                        "--cores-root",
+                        os.path.abspath(destination_path),
+                        "run",
+                        "--setup",
+                        "--no-export",
+                        "--work-root",
+                        work,
+                        "--target",
+                        target,
+                        vlnv,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+                if result.returncode != 0:
+                    print_yellow(f"[DEPS] FuseSoC setup failed: {result.stderr[-500:]}")
+                    return False
+                edam_files = [
+                    os.path.join(work, name)
+                    for name in os.listdir(work)
+                    if name.endswith(".eda.yml")
+                ]
+                if not edam_files:
+                    return False
+                edam = yaml.safe_load(open(edam_files[0], encoding="utf-8")) or {}
+                source_files = []
+                for entry in edam.get("files", []):
+                    if entry.get("file_type") not in (
+                        "verilogSource",
+                        "systemVerilogSource",
+                        "vhdlSource",
+                    ):
+                        continue
+                    path = entry.get("name", "")
+                    if not os.path.isabs(path):
+                        path = os.path.abspath(os.path.join(work, path))
+                    if os.path.exists(path):
+                        source_files.append(path)
+                if source_files:
+                    with open(
+                        generated_flist,
+                        "w",
+                        encoding="utf-8",
+                    ) as flist:
+                        flist.write("\n".join(source_files) + "\n")
+                    print_green(
+                        f"[DEPS] FuseSoC resolved {len(source_files)} HDL files (target={target})"
+                    )
+                    return True
+        except (OSError, subprocess.TimeoutExpired, yaml.YAMLError) as exc:
+            print_yellow(f"[DEPS] FuseSoC setup error: {exc}")
+        return False
+
+    return False
+
+
+def _parse_bender_flist(destination_path: str) -> tuple[list, set]:
+    """Parse Bender-generated flist to extract files and include directories."""
+    flist_path = os.path.join(destination_path, ".bender_flist")
+    if not os.path.exists(flist_path):
+        return [], set()
+
+    additional_files = []
+    additional_includes = set()
+
+    try:
+        with open(flist_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("//") or line.startswith("#"):
+                    continue
+
+                if line.startswith("+incdir+"):
+                    additional_includes.add(line.replace("+incdir+", "").strip())
+                elif line.startswith("-I"):
+                    additional_includes.add(line.replace("-I", "").strip())
+                elif line.endswith((".sv", ".v", ".svh", ".vh", ".vhdl", ".vhd")):
+                    additional_files.append(line)
+
+        print_green(
+            f"[DEPS] Parsed Bender flist: {len(additional_files)} files, {len(additional_includes)} includes"
+        )
+        return additional_files, additional_includes
+
+    except Exception as e:
+        print_yellow(f"[DEPS] Error parsing Bender flist: {e}")
+        return [], set()
+
+
+def _find_and_log_include_dirs(destination_path: str) -> list:
+    """Finds include directories in the repository and logs the result."""
+    print_green("[LOG] Procurando diretórios de inclusão\n")
+    include_dirs = find_include_dirs(destination_path)
+    print_green("[LOG] Diretórios de inclusão encontrados com sucesso\n")
+    return include_dirs
+
+
+def _build_and_log_graphs(
+    files: list, modules: list, destination_path: str = None
+) -> tuple:
+    """Builds the direct and inverse module dependency graphs."""
+    print_green("[LOG] Construindo os grafos direto e inverso\n")
+
+    if destination_path:
+        absolute_files = [
+            os.path.join(destination_path, f) if not os.path.isabs(f) else f
+            for f in files
+        ]
+    else:
+        absolute_files = files
+    module_graph, module_graph_inverse = build_module_graph(absolute_files, modules)
+    print_green("[LOG] Grafos construídos com sucesso\n")
+    return module_graph, module_graph_inverse
+
+
 def main(argv: list[str] | None = None) -> int | None:
     """Compatibility entry point; CLI parsing lives in processor_discover.cli."""
     from processor_discover.cli import main as cli_main
 
     return cli_main(argv)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
