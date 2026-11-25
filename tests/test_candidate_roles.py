@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 from processor_discover.core.api import RunContext
@@ -78,3 +79,33 @@ def test_missing_source_is_retained_without_claiming_a_command_ran(tmp_path):
     assert candidate.files == ["missing.sv"]
     assert candidate.compile_command == ""
     assert "Missing source" in (tmp_path / "config/discovery/demo/logs/missing-source-1.log").read_text()
+
+
+def test_each_failed_verilator_candidate_keeps_its_source_set_and_log(tmp_path):
+    for top in ("Requested", "Heuristic"):
+        (tmp_path / f"{top}.sv").write_text(f"module {top}; endmodule\n")
+    context = RunContext(
+        repo_root=tmp_path, repo_name="demo", config_path=tmp_path / "configs",
+        top_module_override="Requested",
+    )
+    context.cache["heuristic_first_top"] = "Heuristic"
+
+    def failed_attempt(**kwargs):
+        top = kwargs["top_module"]
+        return 1, f"error: {top} failed", [f"{top}.sv"], set(), ["verilator", "--top-module", top]
+
+    with patch("processor_discover.core.config_generator.verilator_incremental", side_effect=failed_attempt):
+        try_incremental_approach(
+            str(tmp_path), "demo", ["Requested", "Heuristic"],
+            [("Requested", "Requested.sv"), ("Heuristic", "Heuristic.sv")],
+            {"Requested": [], "Heuristic": []},
+            top_module_override="Requested", context=context,
+        )
+
+    assert len(context.candidates) == 2
+    assert [candidate.files for candidate in context.candidates] == [
+        ["Requested.sv"], ["Heuristic.sv"],
+    ]
+    assert len({candidate.log_path for candidate in context.candidates}) == 2
+    for candidate in context.candidates:
+        assert candidate.top_module in Path(candidate.log_path).read_text()

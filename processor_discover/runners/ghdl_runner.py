@@ -1217,6 +1217,8 @@ def incremental_compilation(
             continue
 
         top_entity_file = entity_files[0]
+        if os.path.isabs(top_entity_file):
+            top_entity_file = os.path.relpath(top_entity_file, repo_root)
         print_blue(f"[GHDL-INCREMENTAL] Top entity file (final): {top_entity_file}")
         print_blue(f"[GHDL-INCREMENTAL] Repo root: {repo_root}")
         print_blue(f"[GHDL-INCREMENTAL] Repo basename: {repo_name}")
@@ -1267,11 +1269,15 @@ def incremental_compilation(
             timeout=timeout,
             context=context,
         )
+        normalized_files = [
+            os.path.relpath(path, repo_root) if os.path.isabs(path) else path
+            for path in final_files
+        ]
         build_context = {
             "dependency_target": context.dependency_target if context else None,
             "language_version": context.language_version if context else "08",
         }
-        identity_files = [os.path.relpath(f, repo_root) if os.path.isabs(f) else f for f in final_files]
+        identity_files = normalized_files
         attempt_key = candidate_identity(CandidateResult(
             top_module=candidate, top_file=top_entity_file, files=identity_files,
             extra_flags=list(ghdl_extra_flags or []), build_context=build_context,
@@ -1349,7 +1355,7 @@ def incremental_compilation(
                     roles=roles,
                     heuristic_rank=rank,
                     status="inconclusive" if "[TIMEOUT]" in (log or "") else "failure",
-                    files=list(final_files),
+                    files=list(normalized_files),
                     include_dirs=[],
                     extra_flags=list(ghdl_extra_flags or []),
                     parameters={},
@@ -1365,7 +1371,7 @@ def incremental_compilation(
                 from ..core.output import create_output_json
 
                 failed_config = create_output_json(
-                    repo_name, context.repository_url or "", list(final_files),
+                    repo_name, context.repository_url or "", list(normalized_files),
                     [], candidate, "08", False,
                 )
                 failed_config["discovery"] = {

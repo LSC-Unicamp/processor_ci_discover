@@ -186,7 +186,7 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 
 - [x] Define candidate identity, roles, statuses, and deduplication rules.
 - [x] Introduce a common `CandidateResult`/attempt structure.
-- [ ] Preserve failed Verilator and GHDL candidate source sets and logs.
+- [x] Preserve failed Verilator and GHDL candidate source sets and logs.
 - [x] Evaluate the supplied top independently of heuristic ranking.
 - [x] Preserve the initial heuristic top even when it fails.
 - [x] Continue heuristic fallback to the first validation-successful top.
@@ -330,7 +330,7 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 - [x] First heuristic top has an independent retained result.
 - [x] Fallback continues until the first candidate meeting the required validation gate or the search budget ends.
 - [x] No more than three distinct candidate configurations are exported.
-- [ ] Full attempt history and diagnostic logs are retained.
+- [x] Full candidate-attempt history and diagnostic logs are retained.
 - [x] Successful, failed and inconclusive validation are explicitly distinguished.
 - [x] Existing canonical usable-config path and required downstream fields remain compatible.
 - [x] `march` defaults to `rv32i`; `two_memory` defaults to `false` pending later Wrapper work.
