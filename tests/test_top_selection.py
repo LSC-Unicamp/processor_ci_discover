@@ -91,11 +91,11 @@ class TopSelectionRegressionTests(unittest.TestCase):
         ):
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
-                    "processor_discover.core.config_generator.find_and_log_files",
+                    "processor_discover.core.config_generator._find_and_log_files",
                     return_value=(["Core.bsv"], ".bsv"),
                 ),
                 patch(
@@ -103,8 +103,8 @@ class TopSelectionRegressionTests(unittest.TestCase):
                     return_value={"name": "demo", "top_module": "mkCore"},
                 ),
                 patch(
-                    "processor_discover.core.config_generator.save_config",
-                ) as save_config,
+                    "processor_discover.core.config_generator.save_usable_config",
+                ) as save_usable_config,
             ):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
@@ -114,9 +114,9 @@ class TopSelectionRegressionTests(unittest.TestCase):
                 )
 
         self.assertEqual(config["repository"], "https://example.invalid/demo.git")
-        save_config.assert_called_once()
-        central_config_path, saved_config, processor_name = save_config.call_args.args
-        self.assertEqual(central_config_path, str(Path(config_dir) / "config.json"))
+        save_usable_config.assert_called_once()
+        central_config_path, saved_config, processor_name = save_usable_config.call_args.args
+        self.assertEqual(central_config_path, config_dir)
         self.assertEqual(saved_config["top_module"], "mkCore")
         self.assertEqual(processor_name, "demo")
 

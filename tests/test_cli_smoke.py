@@ -25,7 +25,8 @@ class CliSmokeTests(unittest.TestCase):
             [
                 "--processor-url",
                 "https://example.invalid/repo.git",
-                "--no-llama",
+                "--max-candidates",
+                "5",
                 "--top-module",
                 "ExampleTop",
                 "--core-name",
@@ -35,7 +36,7 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(args.processor_url, "https://example.invalid/repo.git")
         self.assertEqual(args.config_path, "config/")
-        self.assertTrue(args.no_llama)
+        self.assertEqual(args.max_candidates, 5)
         self.assertEqual(args.top_module, "ExampleTop")
         self.assertEqual(args.core_name, "owner_repo")
 

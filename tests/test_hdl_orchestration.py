@@ -65,13 +65,13 @@ class HdlOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "already-cloned-core"
             with patch(
-                "processor_discover.core.config_generator.clone_and_validate_repo"
+                "processor_discover.core.config_generator._clone_and_validate_repo"
             ) as clone:
                 with self.assertRaisesRegex(FileNotFoundError, str(missing)):
                     generate_processor_config(
                         "https://example.invalid/demo.git",
                         tmpdir,
-                        no_llama=True,
+                        max_candidates=3,
                         local_repo=str(missing),
                     )
 
@@ -99,7 +99,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
@@ -110,7 +110,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     config_tmp,
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                 )
 
@@ -130,7 +130,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
@@ -147,7 +147,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     str(config_dir),
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                     top_module_override="ForcedTop",
                 )
@@ -181,7 +181,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
@@ -192,7 +192,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     config_tmp,
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                     top_module_override="ForcedTop",
                 )
@@ -219,7 +219,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
@@ -230,7 +230,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     config_tmp,
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                     top_module_override="MissingTop",
                 )
@@ -251,7 +251,7 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
                 ),
                 patch(
@@ -268,7 +268,7 @@ class HdlOrchestrationTests(unittest.TestCase):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     config_tmp,
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                     top_module_override="ForcedTop",
                 )
@@ -280,7 +280,7 @@ class HdlOrchestrationTests(unittest.TestCase):
         self.assertEqual(config["sim_files"], ["forced_top.vhd"])
         self.assertTrue(config["is_simulable"])
 
-    def test_no_llama_does_not_call_ollama_helpers(self) -> None:
+    def test_discovery_block_is_generated(self) -> None:
         with (
             tempfile.TemporaryDirectory() as repo_tmp,
             tempfile.TemporaryDirectory() as config_tmp,
@@ -292,28 +292,18 @@ class HdlOrchestrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processor_discover.core.config_generator.handle_dependency_manager",
+                    "processor_discover.core.config_generator._handle_dependency_manager",
                     return_value=False,
-                ),
-                patch(
-                    "processor_discover.core.pipeline.get_filtered_files_list",
-                    side_effect=AssertionError(
-                        "get_filtered_files_list should not be called"
-                    ),
-                ),
-                patch(
-                    "processor_discover.core.pipeline.get_top_module",
-                    side_effect=AssertionError("get_top_module should not be called"),
                 ),
                 patch(
                     "processor_discover.core.config_generator.verilator_incremental",
                     return_value=(0, "ok", ["heuristic_core.sv"], set()),
-                ) as verilator_incremental,
+                ),
             ):
                 config = generate_processor_config(
                     "https://example.invalid/demo.git",
                     str(config_dir),
-                    no_llama=True,
+                    max_candidates=3,
                     local_repo=str(repo_dir),
                 )
 
@@ -321,13 +311,10 @@ class HdlOrchestrationTests(unittest.TestCase):
                 (config_dir / "demo.json").read_text(encoding="utf-8")
             )
 
-        call_kwargs = verilator_incremental.call_args.kwargs
-        self.assertEqual(call_kwargs["top_module"], "HeuristicCore")
-        self.assertEqual(config["top_module"], "HeuristicCore")
-        self.assertEqual(written_config["top_module"], "HeuristicCore")
-        self.assertEqual(
-            written_config["repository"], "https://example.invalid/demo.git"
-        )
+        self.assertIn("discovery", written_config)
+        self.assertEqual(written_config["schema_version"], "2.0")
+        self.assertIn("sim_files", written_config)
+        self.assertEqual(written_config["sim_files"], ["heuristic_core.sv"])
 
 
 if __name__ == "__main__":

@@ -32,8 +32,7 @@ python3 -m venv env
 pip install -r requirements.txt
 ```
 
-Some discovery paths use external HDL tools such as Verilator or GHDL. OLLAMA is
-optional and can be disabled with `-n`.
+Some discovery paths use external HDL tools such as Verilator or GHDL.
 
 ## Quick Start
 
@@ -53,13 +52,12 @@ python discover_config_generator.py \
   -p config/
 ```
 
-Use a local checkout and skip OLLAMA:
+Use a local checkout to skip cloning:
 
 ```bash
 python -m processor_discover.cli \
   -u https://github.com/<org>/<repo> \
   -l /path/to/local/repo \
-  -n \
   -p generated-configs/
 ```
 
@@ -69,8 +67,9 @@ python -m processor_discover.cli \
 - `-p`, `--config-path`: output config directory. Defaults to `config/`.
 - `-l`, `--local-repo`: local checkout to analyze instead of cloning.
 - `-t`, `--top-module`: preferred top module to try before heuristics.
-- `-n`, `--no-llama`: disable OLLAMA-assisted filtering.
-- `-m`, `--model`: OLLAMA model name.
+- `--top-file`: source file to use when multiple files declare the requested top module.
+- `--dependency-target`: dependency-manager target (e.g. a Bender target).
+- `--max-candidates`: maximum number of distinct candidates to try (default: 3).
 - `-g`, `--plot-graph`: generate a dependency graph plot.
 - `-a`, `--add-to-config`: update a central config file as well.
 
@@ -83,8 +82,8 @@ config = generate_processor_config(
     url="https://github.com/<org>/<repo>",
     config_path="config/",
     local_repo="/path/to/local/repo",
-    no_llama=True,
     top_module_override="<top_module_name>",
+    max_candidates=3,
 )
 ```
 

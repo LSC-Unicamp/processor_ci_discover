@@ -1,0 +1,53 @@
+{
+    "repo_name": "demo",
+    "repository_url": "https://example.invalid/demo.git",
+    "schema_version": "2.0",
+    "candidates": [
+        {
+            "top_module": "mkCore",
+            "top_file": "",
+            "roles": [
+                "first_heuristic"
+            ],
+            "heuristic_rank": 1,
+            "status": "compilation_success",
+            "files": [],
+            "include_dirs": [],
+            "extra_flags": [],
+            "parameters": {},
+            "compile_command": "",
+            "exit_code": 0,
+            "errors": [],
+            "log_file": "discovery/demo/logs/bluespec.log"
+        }
+    ],
+    "successful_candidate": {
+        "top_module": "mkCore",
+        "top_file": "",
+        "roles": [
+            "first_heuristic"
+        ],
+        "heuristic_rank": 1,
+        "status": "compilation_success",
+        "files": [],
+        "include_dirs": [],
+        "extra_flags": [],
+        "parameters": {},
+        "compile_command": "",
+        "exit_code": 0,
+        "errors": [],
+        "log_file": "discovery/demo/logs/bluespec.log"
+    },
+    "output_json": {
+        "name": "demo",
+        "top_module": "mkCore",
+        "repository": "https://example.invalid/demo.git",
+        "discovery": {
+            "schema_version": "2.0",
+            "has_successful_candidate": true,
+            "candidate_count": 1,
+            "candidate_status": "success",
+            "max_candidates": 3
+        }
+    }
+}

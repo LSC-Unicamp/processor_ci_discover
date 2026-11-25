@@ -39,15 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add the generated configuration to a central config file",
     )
     parser.add_argument(
-        "-n",
-        "--no-llama",
-        action="store_true",
-        help="Skip OLLAMA processing for top module identification",
-    )
-    parser.add_argument(
-        "-m", "--model", type=str, default="qwen2.5:32b", help="OLLAMA model to use"
-    )
-    parser.add_argument(
         "-l",
         "--local-repo",
         type=str,
@@ -79,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Select a dependency-manager target (for example a Bender target)",
     )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=3,
+        help="Maximum number of distinct candidate configs to preserve (default: 3)",
+    )
 
     return parser
 
@@ -98,17 +95,17 @@ def main(argv: list[str] | None = None) -> int | None:
             args.config_path,
             args.plot_graph,
             args.add_to_config,
-            args.no_llama,
-            args.model,
             args.local_repo,
             args.top_module,
             core_name=args.core_name,
             top_file_override=args.top_file,
             dependency_target=args.dependency_target,
+            max_candidates=args.max_candidates,
         )
         print("Result: ")
         print(json.dumps(config, indent=4))
-        return None
+        # Return 0 on success (usable config produced), 1 on failure (not simulable)
+        return 0 if config and config.get("is_simulable") else 1
 
     except Exception as e:
         print_red(f"[ERROR] {e}")

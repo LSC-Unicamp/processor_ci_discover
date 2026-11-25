@@ -28,7 +28,7 @@ import shutil
 import time
 
 from ..utils.log import print_green, print_yellow, print_red, print_blue
-from ..core.api import RunContext
+from ..core.api import RunContext, CandidateResult
 
 
 def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str]:
@@ -1212,6 +1212,13 @@ def incremental_compilation(
 
         print_green(f"[GHDL-INCREMENTAL] ✓ File exists: {full_path}")
 
+        # Deduplication key: (candidate, top_entity_file)
+        dedup_key = (candidate, top_entity_file)
+        _ghdl_already_seen = context is not None and any(
+            c.top_module == dedup_key[0] and c.top_file == dedup_key[1]
+            for c in context.candidates
+        )
+
         # Try incremental compilation
         rc, log, final_files = compile_incremental(
             repo_root,
@@ -1223,6 +1230,16 @@ def incremental_compilation(
             timeout=timeout,
             context=context,
         )
+
+        # Determine the role / provenance for this candidate
+        if context is not None and context.top_module_override is not None:
+            role = (
+                "requested"
+                if candidate == context.top_module_override
+                else "fallback"
+            )
+        else:
+            role = "first_heuristic"
 
         if rc == 0:
             print_green(f"[GHDL-INCREMENTAL] ✓ Success with top entity: {candidate}")
@@ -1240,8 +1257,46 @@ def incremental_compilation(
                         normalized_files.append(f)
                 else:
                     normalized_files.append(f)
+            # Record the successful candidate (only if not already recorded)
+            if not _ghdl_already_seen and context is not None:
+                context.candidates.append(
+                    CandidateResult(
+                        top_module=candidate,
+                        top_file=top_entity_file,
+                        roles=[role],
+                        heuristic_rank=0,
+                        status="success",
+                        files=list(normalized_files),
+                        include_dirs=[],
+                        extra_flags=list(ghdl_extra_flags or []),
+                        parameters={},
+                        compile_command="ghdl --analyze " + candidate,
+                        exit_code=0,
+                        errors=[],
+                        log_path=None,
+                    )
+                )
             return True, log, normalized_files, candidate
 
+        # Record failure candidate (only if not already recorded)
+        if not _ghdl_already_seen and context is not None:
+            context.candidates.append(
+                CandidateResult(
+                    top_module=candidate,
+                    top_file=top_entity_file,
+                    roles=[role],
+                    heuristic_rank=0,
+                    status="failure",
+                    files=list(final_files),
+                    include_dirs=[],
+                    extra_flags=list(ghdl_extra_flags or []),
+                    parameters={},
+                    compile_command="ghdl --analyze " + candidate,
+                    exit_code=rc,
+                    errors=[],
+                    log_path=None,
+                )
+            )
         if (
             top_module_override
             and candidate == top_module_override
