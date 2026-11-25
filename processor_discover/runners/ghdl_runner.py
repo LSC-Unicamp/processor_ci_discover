@@ -1167,13 +1167,14 @@ def incremental_compilation(
     )
 
     # Limit candidates for performance
-    MAX_CANDIDATES = 10
+    MAX_CANDIDATES = context.max_candidates if context else 10
     if len(top_candidates) > MAX_CANDIDATES:
         print_yellow(
             f"[GHDL-INCREMENTAL] Limiting to top {MAX_CANDIDATES} candidates (out of {len(top_candidates)})"
         )
         top_candidates = top_candidates[:MAX_CANDIDATES]
 
+    first_success = None
     for idx, candidate in enumerate(top_candidates, 1):
         print_blue(
             f"[GHDL-INCREMENTAL] === Candidate {idx}/{len(top_candidates)}: {candidate} ==="
@@ -1236,15 +1237,20 @@ def incremental_compilation(
             context=context,
         )
 
-        # Determine the role / provenance for this candidate
-        if context is not None and context.top_module_override is not None:
-            role = (
-                "requested"
-                if candidate == context.top_module_override
-                else "fallback"
-            )
-        else:
-            role = "first_heuristic"
+        # Keep heuristic identity independent of an explicit request.
+        requested = bool(context and candidate == context.top_module_override)
+        first_heuristic = bool(context and candidate == context.cache.get("heuristic_first_top"))
+        roles = (["requested"] if requested else []) + (["first_heuristic"] if first_heuristic else [])
+        if not roles:
+            roles = ["fallback"]
+        rank = 1 if first_heuristic else (0 if requested else idx)
+        log_path = None
+        if context and context.config_path:
+            log_dir = os.path.join(context.config_path, "discovery", repo_name, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, f"ghdl-attempt-{idx}.log")
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                log_file.write(log or "")
 
         if rc == 0:
             print_green(f"[GHDL-INCREMENTAL] ✓ Success with top entity: {candidate}")
@@ -1268,9 +1274,9 @@ def incremental_compilation(
                     CandidateResult(
                         top_module=candidate,
                         top_file=top_entity_file,
-                        roles=[role],
-                        heuristic_rank=0,
-                        status="success",
+                        roles=roles,
+                        heuristic_rank=rank,
+                        status="compilation_success",
                         files=list(normalized_files),
                         include_dirs=[],
                         extra_flags=list(ghdl_extra_flags or []),
@@ -1278,10 +1284,12 @@ def incremental_compilation(
                         compile_command=last_cmd,
                         exit_code=0,
                         errors=[],
-                        log_path=None,
+                        log_path=log_path,
                     )
                 )
-            return True, log, normalized_files, candidate, last_cmd
+            if first_success is None:
+                first_success = (True, log, normalized_files, candidate, last_cmd)
+            continue
 
         # Record failure candidate (only if not already recorded)
         if not _ghdl_already_seen and context is not None:
@@ -1289,8 +1297,8 @@ def incremental_compilation(
                 CandidateResult(
                     top_module=candidate,
                     top_file=top_entity_file,
-                    roles=[role],
-                    heuristic_rank=0,
+                    roles=roles,
+                    heuristic_rank=rank,
                     status="failure",
                     files=list(final_files),
                     include_dirs=[],
@@ -1298,10 +1306,28 @@ def incremental_compilation(
                     parameters={},
                     compile_command=last_cmd,
                     exit_code=rc,
-                    errors=[],
-                    log_path=None,
+                    errors=[line.strip() for line in log.splitlines() if "error" in line.lower()] or log.splitlines()[-5:],
+                    log_path=log_path,
                 )
             )
+            if context.config_path:
+                from ..core.config import save_failed_candidate_config
+                from ..core.output import create_output_json
+
+                failed_config = create_output_json(
+                    repo_name, context.repository_url or "", list(final_files),
+                    [], candidate, "08", False,
+                )
+                failed_config["discovery"] = {
+                    "has_successful_candidate": False,
+                    "candidate_status": "failure",
+                    "roles": roles,
+                    "validation_level": "ghdl_analyze_or_elaborate",
+                }
+                save_failed_candidate_config(
+                    str(context.config_path), failed_config, repo_name,
+                    top_module=candidate, attempt_index=idx,
+                )
         if (
             top_module_override
             and candidate == top_module_override
@@ -1312,5 +1338,7 @@ def incremental_compilation(
             )
         print_yellow(f"[GHDL-INCREMENTAL] ✗ Failed with top entity: {candidate}")
 
+    if first_success is not None:
+        return first_success
     print_red("[GHDL-INCREMENTAL] All candidates failed")
     return False, "", [], "", ""

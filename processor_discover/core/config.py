@@ -100,8 +100,7 @@ def is_usable_config(config_data: dict) -> bool:
     - ``schema_version`` is ``"2.0"`` (Phase 1 schema).
     - ``sim_files`` is a non-empty list.
     - ``top_module`` is a non-empty string.
-    - The ``discovery`` block (if present) does **not** mark the config
-      as failed/partial.
+    - The ``discovery`` block explicitly marks a validated candidate.
 
     Returns ``False`` otherwise, so that non-valid configs can be placed
     in a ``candidates/`` sub-directory without existing scripts mistaking
@@ -123,15 +122,17 @@ def is_usable_config(config_data: dict) -> bool:
     if not config_data.get("top_module"):
         return False
 
-    # If a discovery block exists, check that the config is not marked failed/partial
+    # A missing or malformed validation record cannot establish usability.
     discovery = config_data.get("discovery")
-    if isinstance(discovery, dict):
-        success = discovery.get("has_successful_candidate", False)
-        if success is False:
-            return False
-        # Explicit fail markers
-        if discovery.get("candidate_status") in ("failure",):
-            return False
+    if not isinstance(discovery, dict):
+        return False
+    if discovery.get("has_successful_candidate") is not True:
+        return False
+    if discovery.get("candidate_status") in ("failure", "partial", "inconclusive"):
+        return False
+    gate = discovery.get("validation_gate")
+    if gate is not None and (not isinstance(gate, dict) or gate.get("passed") is not True):
+        return False
 
     return True
 

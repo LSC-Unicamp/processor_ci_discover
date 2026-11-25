@@ -2,8 +2,8 @@
 
 **Project:** [ProcessorCI Discover](https://github.com/LSC-Unicamp/processor_ci_discover)  
 **Scope:** Discovery, validation, diagnostics, and generation of processor build configurations for the ProcessorCI suite and RV-Bench.  
-**Status:** Planning document  
-**Last revised:** 2026-11-17
+**Status:** Phase 1 implementation under review; Phase 2 preparation
+**Last revised:** 2026-11-25
 
 ## 1. Purpose and direction
 
@@ -189,10 +189,10 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 - [ ] Preserve failed Verilator and GHDL candidate source sets and logs.
 - [ ] Evaluate the supplied top independently of heuristic ranking.
 - [ ] Preserve the initial heuristic top even when it fails.
-- [ ] Continue heuristic fallback to the first validation-successful top.
+- [x] Continue heuristic fallback to the first validation-successful top.
 - [ ] Export at most three distinct candidate configs and a full attempt report.
-- [ ] Ensure failed configs cannot enter the usable-config index.
-- [ ] Retain `march=rv32i` and `two_memory=false` defaults.
+- [x] Ensure failed configs cannot enter the usable-config index.
+- [x] Retain `march=rv32i` and `two_memory=false` defaults.
 - [ ] Add regression tests for requested top, first heuristic, fallback, no-success, deduplication and output compatibility.
 
 **Exit criteria:** Every relevant path is preserved; normal fallback still works; downstream consumers continue to receive an unambiguous usable config when available.
@@ -208,6 +208,8 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 - [ ] Add stable CLI output modes and machine-readable exit codes.
 
 **Exit criteria:** Failed configs are reproducible and self-describing enough for an external repair workflow.
+
+See [Phase 2 readiness audit](docs/phase2-readiness.md) for the current gaps, dependencies, and acceptance checks.
 
 ### Phase 3— Better processor and dependency discovery (**P1**)
 
@@ -305,11 +307,11 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 
 ### Essential regression scenarios
 
-- [ ] Explicit top succeeds; heuristic top differs.
+- [x] Explicit top succeeds; heuristic top differs.
 - [ ] Explicit top fails; first heuristic top fails; later heuristic succeeds.
-- [ ] Explicit top fails; first heuristic succeeds.
-- [ ] Explicit top equals first heuristic candidate; deduplication preserves both roles.
-- [ ] No candidate passes validation; no usable config is published.
+- [x] Explicit top fails; first heuristic succeeds.
+- [x] Explicit top equals first heuristic candidate; deduplication preserves both roles.
+- [x] No candidate passes validation; no usable config is published.
 - [ ] Early candidate has partial source/include information and errors; all are preserved.
 - [ ] Lint passes but simulator build fails.
 - [ ] Simulator build passes but smoke simulation fails or is blocked.
@@ -326,12 +328,12 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 
 - [ ] Requested top always has a retained complete or partial candidate result.
 - [ ] First heuristic top has an independent retained result.
-- [ ] Fallback continues until the first candidate meeting the required validation gate or the search budget ends.
+- [x] Fallback continues until the first candidate meeting the required validation gate or the search budget ends.
 - [ ] No more than three distinct candidate configurations are exported.
 - [ ] Full attempt history and diagnostic logs are retained.
 - [ ] Successful, failed and inconclusive validation are explicitly distinguished.
-- [ ] Existing canonical usable-config path and required downstream fields remain compatible.
-- [ ] `march` defaults to `rv32i`; `two_memory` defaults to `false` pending later Wrapper work.
+- [x] Existing canonical usable-config path and required downstream fields remain compatible.
+- [x] `march` defaults to `rv32i`; `two_memory` defaults to `false` pending later Wrapper work.
 - [x] Ollama-specific integration is removed from the current core discovery workflow.
 - [ ] Regression tests exercise all three-candidate cases and no-success behavior.
 
