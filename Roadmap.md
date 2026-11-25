@@ -190,7 +190,7 @@ The agent runner may later be implemented with a chosen agent harness; **no Olla
 - [ ] Evaluate the supplied top independently of heuristic ranking.
 - [ ] Preserve the initial heuristic top even when it fails.
 - [x] Continue heuristic fallback to the first validation-successful top.
-- [ ] Export at most three distinct candidate configs and a full attempt report.
+- [x] Export at most three distinct candidate configs and a full attempt report.
 - [x] Ensure failed configs cannot enter the usable-config index.
 - [x] Retain `march=rv32i` and `two_memory=false` defaults.
 - [ ] Add regression tests for requested top, first heuristic, fallback, no-success, deduplication and output compatibility.
@@ -329,13 +329,13 @@ Track **discovery accuracy**, **build success**, and **simulation execution** as
 - [ ] Requested top always has a retained complete or partial candidate result.
 - [ ] First heuristic top has an independent retained result.
 - [x] Fallback continues until the first candidate meeting the required validation gate or the search budget ends.
-- [ ] No more than three distinct candidate configurations are exported.
+- [x] No more than three distinct candidate configurations are exported.
 - [ ] Full attempt history and diagnostic logs are retained.
 - [ ] Successful, failed and inconclusive validation are explicitly distinguished.
 - [x] Existing canonical usable-config path and required downstream fields remain compatible.
 - [x] `march` defaults to `rv32i`; `two_memory` defaults to `false` pending later Wrapper work.
 - [x] Ollama-specific integration is removed from the current core discovery workflow.
-- [ ] Regression tests exercise all three-candidate cases and no-success behavior.
+- [x] Regression tests exercise all three-candidate cases and no-success behavior.
 
 **Validation gate:** Match RV-Bench config validation: verify declared source files and include directories, then run Verilator lint for Verilog/SystemVerilog or GHDL analyze and elaborate for VHDL. Record the exact level passed. Generator projects require their generated RTL to exist before the applicable RTL tool check. Simulator execution may be evaluated separately; it is not required to publish a configuration validated by this gate.
 

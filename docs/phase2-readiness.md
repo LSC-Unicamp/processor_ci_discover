@@ -7,11 +7,11 @@ Checked against `Roadmap.md` after Phase 1 merge. The roadmap marks only behavio
 | Gap | Current evidence | Completion check |
 | --- | --- | --- |
 | Candidate identity | Verilator and GHDL deduplicate by top and file; build flags, parameters, and source context are excluded. | Distinct build contexts remain distinct; identical contexts merge requested and heuristic roles. |
-| Complete candidate export | CLI accepts `--max-candidates` above three, and success/failure exports are performed in several paths. | Report retains every attempt while only the requested, first heuristic, and first validated fallback configurations are exported, with no more than three distinct files. |
+| Candidate export follow-up | The HDL finalizer now selects at most three role-bearing configs while retaining all attempts in the report. Generated-language paths still use their own one-candidate writer. | Unify these writers and prove stale output cleanup across repeated runs. |
 | Full attempt evidence | Some early failures have no command or log; Verilog and VHDL paths use different log locations. | Every attempt, including a missing requested top and timeout, has source/include data, command when executed, status, and a durable log or explicit no-command reason. |
 | Explicit validation levels | Results use `compilation_success` and `failure`; inconclusive conditions are not consistently represented. | Config validation, failed validation, and blocked/timeout outcomes are separate and never reported as simulation execution. |
 | Default provenance | Canonical and candidate outputs now carry `march=rv32i` and `two_memory=false`; generated-language outputs mark default provenance, while RTL outputs do not yet. | All exported paths mark whether each value was inferred, supplied, or defaulted. |
-| Regression matrix | Existing tests cover common Verilog cases and a focused VHDL failure case. | Add requested=first-heuristic dedup, three distinct outputs, VHDL no-success, and compatibility fixtures. |
+| Regression matrix | Tests now cover requested=first-heuristic dedup and three distinct exports, plus a focused VHDL failure case. | Add VHDL no-success and downstream compatibility fixtures. |
 
 ## Phase 2 implementation order
 

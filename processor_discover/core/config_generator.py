@@ -67,6 +67,7 @@ from .file_manager import (
 )
 from .graph import plot_processor_graph, build_module_graph
 from .output import create_output_json, build_discovery_report, save_discovery_report
+from .candidate_export import export_candidates
 from ..lang.bluespec_manager import find_bsv_files
 from ..lang.chisel_manager import find_scala_files
 from ..utils.log import print_green, print_red, print_yellow
@@ -1776,6 +1777,7 @@ def generate_processor_config(
 
     # Save full discovery report
     try:
+        export_candidates(config_path, repo_name, url, language_version_out, run_context.candidates)
         report = build_discovery_report(
             repo_name=repo_name,
             repository_url=url,
